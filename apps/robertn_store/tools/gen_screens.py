@@ -28,15 +28,27 @@ def text(name, x, y, w, h, t, size, font='label', color='text', align='left', wr
     return comp(name, 'text', x, y, w, h, o)
 BACK = copy.deepcopy(get(S['app'], 'back'))
 screens = []
+# Restart pending and Restart now over a tab's content while a restart waits; shown, it moves push down
+def bar(st, before, push):
+    i = next(k for k, c in enumerate(st['components']) if c['name'] == before)
+    st['components'][i:i] = [
+        comp('restartBar', 'rect', 480, 292, 2360, 100, {'color': 'panelTop', 'radius': 28, 'push': push, 'by': 124, 'hidden': True}),
+        text('restartText', 524, 326, 1600, 46, 'Restart pending', 38, 'bold', '#ffb020'),
+        comp('restartNow', 'vbutton', 2340, 304, 480, 76, {'text': 'Restart now', 'vicon': 'refresh', 'style': 'primary', 'size': 32,
+            'color': '#3d9bff', 'hidden': True}, 'event:restartNow'),
+    ]
+    st['components'][i + 1]['opts']['hidden'] = True
 # store: his, filter Apps / Tools
-st = copy.deepcopy(S['store']); get(st, 'filter')['opts']['items'] = 'All,Apps,Tools'; screens.append(st)
+st = copy.deepcopy(S['store']); get(st, 'filter')['opts']['items'] = 'All,Apps,Tools'
+bar(st, 'grid', ['grid']); screens.append(st)
 # app: his, and under the description what an installed tool says is wrong
 st = copy.deepcopy(S['app']); get(st, 'desc')['h'] = 250
 st['components'].append(text('problem', 480, 730, 1560, 90, '', 36, 'label', '#ffb020', wrap=True)); screens.append(st)
 # confirm: his restart sheet, for every confirm step
 st = copy.deepcopy(S['restart']); st['name'] = 'confirm'; screens.append(st)
 # installed: his, tools for system services
-st = copy.deepcopy(S['installed']); get(st, 'svcLabel')['opts']['text'] = 'HEAD-UNIT TOOLS'; screens.append(st)
+st = copy.deepcopy(S['installed']); get(st, 'svcLabel')['opts']['text'] = 'HEAD-UNIT TOOLS'
+bar(st, 'appsLabel', ['appsLabel', 'apps', 'svcLabel', 'services']); screens.append(st)
 st = copy.deepcopy(S['usb']); get(st, 'title')['opts']['text'] = 'USB'; screens.append(st)
 # settings: sources on the left, access and the head unit on the right
 st = copy.deepcopy(S['settings'])

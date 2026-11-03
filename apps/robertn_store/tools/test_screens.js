@@ -351,6 +351,55 @@ ok(screen('settings', {}, idle).labels.indexOf('Restart head unit') >= 0, 'Resta
 const refused = Object.assign({}, idle, { rebootError: 'too soon after start-up, possible in 3 min' });
 eq(text(screen('settings', {}, refused), 'note'), 'Restart failed: too soon after start-up, possible in 3 min', 'a refused restart beside Restart head unit');
 
+// the restart bar over Store and Installed: while a restart is pending and Restart head unit is offered, Restart now
+// (after the filters, before Update all's rows) opens Settings' confirm step; shown, it moves the grid and lists down
+const restartAct = { do: 'open', page: { name: 'confirm', kind: 'restart' } };
+const barOf = (g) => [g.values.restartBar.hidden, g.values.restartText.hidden, g.values.restartText.text, g.values.restartNow.hidden];
+f = screen('store-restart');
+eq(barOf(f), [false, false, 'Restart pending', false], 'Store: the bar while a restart is pending');
+eq(f.labels.slice(4, 8), ['All', 'Apps', 'Tools', 'Restart now'], 'Store: Restart now after the filters, before the tiles');
+eq([f.items[7].act, screen('settings', {}, idle).items.find((it) => it.label === 'Restart head unit').act], [restartAct, restartAct],
+    'Restart now opens the confirm step Restart head unit opens');
+f = screen('installed-restart');
+eq(barOf(f), [false, false, 'Restart pending', false], 'Installed: the bar while a restart is pending');
+eq(f.labels.slice(4, 6), ['Update all (3)', 'Restart now'], 'Installed: Restart now after Update all, before the rows');
+eq(f.items[5].act, restartAct);
+eq(f.values.services.items.map((i) => i.right).filter((r) => /^chip:/.test(r)), ['chip:Restart pending', 'chip:Not working'],
+    'Installed: the bar over a row restarting and one not working');
+eq(barOf(screen('installed')), [true, true, undefined, true], 'hidden while an install runs (no Restart head unit)');
+eq(barOf(screen('store')), [true, true, undefined, true]);
+const restarted = Object.assign({}, idle, { components: idle.components.map((c) => Object.assign({}, c, { pendingReboot: false })) });
+eq([barOf(screen('store-restart', {}, restarted)), barOf(screen('installed-restart', {}, restarted))],
+    [[true, true, undefined, true], [true, true, undefined, true]], 'hidden with no restart pending');
+eq(barOf(screen('installed-restart', {}, { rebooting: true })), [true, true, undefined, true], 'hidden while the unit restarts');
+eq(barOf(screen('installed-restart', {}, { rebooting: undefined })), [true, true, undefined, true], 'hidden with an updater that cannot restart');
+const otherUnit = Object.assign({}, restarted, { components: restarted.components.concat([Object.assign({}, idle.components[0],
+    { id: 'gone', compat: 'no', installed: null, status: 'available', pendingReboot: true })]) });
+eq(barOf(screen('store-restart', {}, otherUnit)), [true, true, undefined, true], 'a row the Store does not list counts for nothing');
+// Installed's held rows keep the bar as drawn
+eq([barOf(screen('installed-restart', { held: { apps: [], services: [], bar: false } })),
+    barOf(screen('installed-restart', { held: { apps: [], services: [], bar: true } }, restarted))],
+[[true, true, undefined, true], [false, false, 'Restart pending', false]], 'Installed\'s held rows: the bar as drawn');
+eq(barOf(screen('installed', { held: { apps: [], services: [], bar: true } })), [true, true, undefined, true],
+    'held rows: hidden while an install runs');
+Object.keys(UNITS).forEach((unit) => {
+    const p = UNITS[unit];
+    const at = (name, stOver, el) => {
+        const s = fixture.screens().find((x) => x[0] === name);
+        const m = fixture.model(s[1], Object.assign(fixture.state(), s[2], stOver || {}));
+        return frame(m, { textScale: p.scale, focus: -1, scroll: {}, layout: p.layout }).regions.find((r) => r.key === el);
+    };
+    const def = (p.layout || SCREENS).screens.find((x) => x.name === 'store').components.find((c) => c.name === 'restartBar');
+    [['store-restart', 'store.grid'], ['installed-restart', 'installed.apps'], ['installed-restart', 'installed.services']].forEach(([name, key]) => {
+        const shown = at(name, {}, key);
+        const gone = at(name, restarted, key);
+        eq([shown.y - gone.y, gone.y + gone.h - shown.y - shown.h], [def.opts.by, 0], `${unit} ${key}: down by the bar while shown, same bottom`);
+        ok(def.y + def.h <= shown.y, `${unit} ${key}: below the bar`);
+    });
+    const plain = (p.layout || SCREENS).screens.find((x) => x.name === 'store').components.find((c) => c.name === 'grid');
+    eq(at('store-restart', restarted, 'store.grid').y, plain.y, `${unit}: hidden, the grid where the layout has it`);
+});
+
 // a source: Remove; the GitHub App's install page while a sign-in does not reach it
 f = screen('source');
 eq(own(f), ['Remove', 'Back']);

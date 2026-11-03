@@ -50,6 +50,15 @@ function compact(W, H) {
     const list = (name, x, y, w, h, extra) => el(name, 'appList', x, y, w, h, Object.assign({ items: '' }, LIST, extra || {}));
     const label = (name, x, y, t) => text(name, x, y, 400, 26, t, 20, 'bold', DIM);
 
+    // Restart pending and Restart now over a tab's content while a restart waits (store_ui.js restartBar); shown, it moves push down
+    const BAR_H = 64;
+    const BAR_Y = HEAD + 8;
+    const bar = (push) => [
+        el('restartBar', 'rect', X, BAR_Y, CW, BAR_H, { color: 'panelTop', radius: 18, push, by: BAR_H + 12, hidden: true }),
+        text('restartText', X + 24, BAR_Y + 19, CW - 360, 34, 'Restart pending', 26, 'bold', AMBER, { hidden: true }),
+        button('restartNow', R - 8 - 290, BAR_Y + 7, 290, BAR_H - 14, 'Restart now', 'primary', 24, { vicon: 'refresh', color: BLUE, hidden: true })
+    ];
+
     const FILTER_W = 420;
     const ONLINE_W = 190;
     const filterX = R - ONLINE_W - 20 - FILTER_W;
@@ -57,9 +66,8 @@ function compact(W, H) {
         title('Store'),
         after('subtitle', X + 160, filterX - X - 180),
         el('filter', 'tabs', filterX, M + 2, FILTER_W, 60, { items: 'All,Apps,Tools', sel: 0, style: 'joined', size: 24 }),
-        el('online', 'chips', R - ONLINE_W, M + 8, ONLINE_W, 48, { items: '', align: 'right' }),
-        grid()
-    ]);
+        el('online', 'chips', R - ONLINE_W, M + 8, ONLINE_W, 48, { items: '', align: 'right' })
+    ].concat(bar(['grid']), [grid()]));
     const usb = screen('usb', 2, [title('USB'), after('subtitle', X + 130, CW - 130), grid()]);
 
     const colW = (CW - 24) / 2;
@@ -67,12 +75,13 @@ function compact(W, H) {
     const installed = screen('installed', 1, [
         title('Installed'),
         after('subtitle', X + 240, CW - 240 - 380),
-        button('updateAll', R - 360, M, 360, 66, '', 'primary', 25, { vicon: 'arrowDown', color: BLUE }),
+        button('updateAll', R - 360, M, 360, 66, '', 'primary', 25, { vicon: 'arrowDown', color: BLUE })
+    ].concat(bar(['appsLabel', 'apps', 'svcLabel', 'services']), [
         label('appsLabel', X, HEAD + 8, 'APPS'),
         list('apps', X, LIST_Y, colW, B - LIST_Y, { empty: 'No apps installed' }),
         label('svcLabel', X + colW + 24, HEAD + 8, 'HEAD-UNIT TOOLS'),
         list('services', X + colW + 24, LIST_Y, colW, B - LIST_Y)
-    ]);
+    ]));
 
     const leftW = Math.round(CW * 0.56);
     const rx = X + leftW + 24;

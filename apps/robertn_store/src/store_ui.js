@@ -17,7 +17,8 @@ const { t: tr } = require('./i18n.js');
  * updater's answer, null while it looks), tokenNote (Add token's status
  * belongs on its page) }, or null), uplinkNote (the uplink's refusal of the
  * last Wi-Fi or preferred-connection request), held (the Installed lists'
- * rows to keep in this order: { apps, services } ids, or null) }.
+ * rows to keep in this order: { apps, services } ids, and bar: whether its
+ * restart bar shows; or null) }.
  *
  * What a press does rides on the values as `act`: on a button's opts, on
  * each nav, grid and list item, on each filter cell (acts). The acts:
@@ -109,6 +110,19 @@ function canRestart(m) {
     return !!(m.connected && st && !st.busy && st.rebooting === false && !comps(m).some((c) => c.queued));
 }
 
+/* The bar over Store and Installed while a listed component waits for a
+ * restart (an installed tool, or an iDrive 8 app change queued for the next
+ * start) and Restart head unit is offered: Restart now opens its confirm
+ * step. keep: shown or not as drawn (Installed's held rows), while Restart
+ * head unit is offered. */
+function restartBar(m, keep) {
+    if (!canRestart(m) || (typeof keep === 'boolean' ? !keep : !comps(m).some((c) => c.pendingReboot))) {
+        return { restartBar: hidden, restartText: hidden, restartNow: hidden };
+    }
+    return { restartBar: { hidden: false }, restartText: { hidden: false, text: tr("Restart pending") },
+        restartNow: button(tr("Restart now"), { do: 'open', page: { name: 'confirm', kind: 'restart' } }, { vicon: 'refresh', style: 'primary', color: BLUE }) };
+}
+
 /* Why the last restart failed or was refused, beside Restart head unit. */
 function restartFailed(m) {
     const st = m.connected ? m.st : null;
@@ -196,7 +210,7 @@ function storeView(m) {
     const list = comps(m).filter((c) => m.filter === 'all' || (m.filter === 'app' ? !isTool(c) : isTool(c)));
     const checking = !!(m.connected && m.st && m.st.catalog && m.st.catalog.checking);
     const online = m.connected && m.st && m.st.online;
-    return {
+    return Object.assign({
         title: { text: tr("Store") },
         subtitle: busyRow ? { text: `${busy.phase === 'download' ? tr("Downloading {0} %", percent(busy)) : tr(PHASE[busy.phase] || 'Installing')} · ${named(m, busyRow)}`, color: BLUE }
             : { text: m.connected ? statusLine(st, true) : statusLine(null, false, m.secret), color: DIM },
@@ -204,7 +218,7 @@ function storeView(m) {
         online: { items: !m.connected ? [] : checking ? [{ text: tr("Checking"), color: BLUE, dot: true }]
             : online ? [{ text: tr("Online"), color: GREEN, dot: true }] : [{ text: tr("Offline"), color: AMBER, dot: true }] },
         grid: { items: list.map((c) => tile(m, c, busy)), empty: m.connected ? tr("Nothing here") : '' }
-    };
+    }, restartBar(m));
 }
 
 function installedView(m) {
@@ -226,13 +240,13 @@ function installedView(m) {
             right: up ? 'chip:' + tr('Update') : s.sub !== tr("Installed") ? `chip:${s.sub}` : 'chevron', chipColor: up ? BLUE : s.subColor,
             chipAct: up ? { do: 'install', id: c.id } : null });
     };
-    return {
+    return Object.assign({
         title: { text: tr("Installed") },
         subtitle: { text: `${plural(apps.length, 'app')} · ${plural(tools.length, 'tool')}` },
         updateAll: updates.length ? button(tr("Update all ({0})", updates.length), { do: 'update-all' }, { vicon: 'arrowDown', style: 'primary', color: BLUE }) : hidden,
         apps: { items: apps.map(item), empty: tr("None") },
         services: { items: tools.map(item), empty: tr("None"), rowH: 120 }
-    };
+    }, restartBar(m, m.held ? m.held.bar : undefined));
 }
 
 function usbView(m) {

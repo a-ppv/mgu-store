@@ -97,6 +97,59 @@ module.exports = {
      }
     },
     {
+     "name": "restartBar",
+     "rtype": "gpu",
+     "gpu": "rect",
+     "x": 480,
+     "y": 292,
+     "w": 2360,
+     "h": 100,
+     "opts": {
+      "color": "panelTop",
+      "radius": 28,
+      "push": [
+       "grid"
+      ],
+      "by": 124,
+      "hidden": true
+     }
+    },
+    {
+     "name": "restartText",
+     "rtype": "gpu",
+     "gpu": "text",
+     "x": 524,
+     "y": 326,
+     "w": 1600,
+     "h": 46,
+     "opts": {
+      "text": "Restart pending",
+      "size": 38,
+      "font": "bold",
+      "align": "left",
+      "color": "#ffb020",
+      "hidden": true
+     }
+    },
+    {
+     "name": "restartNow",
+     "rtype": "gpu",
+     "gpu": "vbutton",
+     "x": 2340,
+     "y": 304,
+     "w": 480,
+     "h": 76,
+     "opts": {
+      "text": "Restart now",
+      "vicon": "refresh",
+      "style": "primary",
+      "size": 32,
+      "color": "#3d9bff",
+      "hidden": true
+     },
+     "onTap": "event:restartNow"
+    },
+    {
      "name": "grid",
      "rtype": "gpu",
      "gpu": "appGrid",
@@ -610,6 +663,62 @@ module.exports = {
       "color": "#3d9bff"
      },
      "onTap": "event:updateAll"
+    },
+    {
+     "name": "restartBar",
+     "rtype": "gpu",
+     "gpu": "rect",
+     "x": 480,
+     "y": 292,
+     "w": 2360,
+     "h": 100,
+     "opts": {
+      "color": "panelTop",
+      "radius": 28,
+      "push": [
+       "appsLabel",
+       "apps",
+       "svcLabel",
+       "services"
+      ],
+      "by": 124,
+      "hidden": true
+     }
+    },
+    {
+     "name": "restartText",
+     "rtype": "gpu",
+     "gpu": "text",
+     "x": 524,
+     "y": 326,
+     "w": 1600,
+     "h": 46,
+     "opts": {
+      "text": "Restart pending",
+      "size": 38,
+      "font": "bold",
+      "align": "left",
+      "color": "#ffb020",
+      "hidden": true
+     }
+    },
+    {
+     "name": "restartNow",
+     "rtype": "gpu",
+     "gpu": "vbutton",
+     "x": 2340,
+     "y": 304,
+     "w": 480,
+     "h": 76,
+     "opts": {
+      "text": "Restart now",
+      "vicon": "refresh",
+      "style": "primary",
+      "size": 32,
+      "color": "#3d9bff",
+      "hidden": true
+     },
+     "onTap": "event:restartNow"
     },
     {
      "name": "appsLabel",
