@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.22
+
+The status line says **Restart head unit to install apps** while the
+deploy tool holds app changes until the next start (mgu-updater 0.8.26's
+`mainappGuard`), and **Restart head unit to show** an app whose tile an
+install that restarted the app manager left hidden (`tileHidden`), in
+every language.
+
 ## 0.9.21
 
 Removing an app lists, in its confirm step, the tools only that app uses

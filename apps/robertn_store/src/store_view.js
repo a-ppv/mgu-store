@@ -192,6 +192,13 @@ function statusLine(st, connected, secret) {
     if (st.privacy && st.privacy !== 'patched') {
         return tr("App privacy patch not in effect");
     }
+    if (st.mainappGuard) {
+        return tr("Restart head unit to install apps");
+    }
+    const hidden = st.components.find((c) => c.tileHidden && c.installed);
+    if (hidden) {
+        return tr("Restart head unit to show {0}", hidden.title);
+    }
     const failed = st.components.find((c) => c.error && listed(c));
     if (failed && !st.busy) {
         return `${failed.title}: ${failed.error}`;

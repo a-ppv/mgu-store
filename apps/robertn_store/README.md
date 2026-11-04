@@ -179,7 +179,11 @@ after the head unit's next start.
 Each row's name ends with its author, as on the Store's tiles: `DOOM (cauliflowermossgrape)`.
 
 The start screen has a status line (`1 update, checked 14:02`, `Offline`,
-`Checking for updates`, `Restarting`, the last error; `Restart the head
+`Checking for updates`, `Restarting`, the last error; `Restart head unit to
+install apps` while the deploy tool holds app changes until the next start
+(the updater's `mainappGuard`); `Restart head unit to show <app>` while an
+app's tile is hidden after an install that restarted the app manager
+(`tileHidden`); `Restart the head
 unit to finish setup` while the updater has not run since the Store was
 installed, which after the first install is until the next start; `Updater
 not running` once it has), a **Check for updates** button, a progress bar for the running
@@ -396,15 +400,15 @@ tools/test_fit.js          every language's words on every drawn screen: nothing
 tools/shots.js             screenshots of the drawn screens through mgu-render --replay (STORE_LANGUAGE: in that language)
 tools/test_drag.js         a drag frame against the frame built whole, through mgu-render --replay
 tools/make_icon.py         the 140x140 tile icon
-robertn_store@0.9.21/       staged package tree (no javascript/: the build writes it)
+robertn_store@0.9.22/       staged package tree (no javascript/: the build writes it)
 ```
 
 ## Build
 
 ```sh
 cd apps/robertn_store
-node tools/build.js                                # robertn_store@0.9.21.src.tgz
-node tools/build.js --sdk <donor .tgz|.js>         # and robertn_store@0.9.21.tgz (MGU_SDK_DONOR)
+node tools/build.js                                # robertn_store@0.9.22.src.tgz
+node tools/build.js --sdk <donor .tgz|.js>         # and robertn_store@0.9.22.tgz (MGU_SDK_DONOR)
 node tools/test_view.js && node tools/test_rhmi.js && node tools/test_qr.js && node tools/test_speller.js &&
     node tools/test_screens.js && node tools/test_store.js && STORE_HMI=ID8 node tools/test_store.js &&
     node tools/test_i18n.js
