@@ -147,7 +147,8 @@ deploy/hu status --host 127.0.0.1 --port 2225 \
 ```
 
 Exit status everywhere: 0 done, 1 failed (rolled back where it applies),
-2 refused before anything changed (and bad usage).
+2 refused before anything changed (and bad usage), 3 stopped by the MainApp
+guard (iDrive 7, "Bouncing the app manager"): what it changed stays.
 
 ### The updater's sources and tokens
 
@@ -1032,8 +1033,10 @@ gives an app's `previous` (null on iDrive 8, where it is refused).
 (`state.json` `apps`) that MainApp's registry no longer has while the
 installed version's package is kept, as oapcontroller's wipe leaves them;
 none while another run holds the lock. The updater installs them again
-from that package. An uninstall drops both the app's record and its kept
-packages, so an app removed on purpose is never one.
+from that package. An uninstall (also one the MainApp guard stopped) and a
+restore that removes an app drop both the app's record and its kept
+packages, so an app removed on purpose is never one. An uninstall that
+fails and is rolled back keeps both, and its registry entry is back.
 
 ### app-privacy
 
@@ -1107,20 +1110,28 @@ is watched until it has been up 60 s (`MGU_DEPLOY_GUARD_WATCH_S`), so a
 manager that crashes right after a bounce never reaches the third death.
 One that dies before turns the guard off for the rest of the boot:
 
-- the run fails, saying so; no bounce follows, and app installs, removals,
-  rollbacks and `fallback migrate` are refused (exit 2, `… waits for the
-  next start of the head unit: <why>`). Tools still install;
-- `main.js` and `CertificateManager.js` are unbound, and nothing binds
-  them again, so the next manager starts on the files under them as they
-  are (app-privacy's apply after an unbind waits for its run at the next
-  start). The fallback's boot unit binds the copy again at the next start.
+- the run stops where it is (exit 3, `… stopped here: what this run
+  changed stays`). Nothing is rolled back: that would write `/`, the
+  registry, `custom_apps.json` and app folders while the next manager
+  starts. What it placed and listed is taken up at the next start of the
+  head unit; an app removal it stopped counts as done (its record and kept
+  packages go);
+- `main.js` and `CertificateManager.js` are unbound, so the next manager
+  starts on the files under them as they are. Until the next start nothing
+  binds them again, nothing bounces, and app-privacy is not applied: an
+  apply is left to `app-privacy.service` at the next start (app-privacy
+  reported pending). The fallback's boot unit binds the copy again then;
+- app installs, removals, rollbacks, `fallback migrate`, `restore` and the
+  removal of app-privacy or IterioDev's App Manager are refused (exit 2,
+  `… waits for the next start of the head unit: <why>`). Other tools still
+  install.
 
 The guard file (`oap_12201/data/mgu-deploy-guard.json`, `{boot, bounce,
 watch, off}`) is written before the bounce and when the watch starts. A
-run cut short while it watched leaves its watch there: the next changing
-run, or `status` run as root (under the lock, when free), finds the watched
-manager gone and none started after the watch would have ended, and turns
-the guard off. The fallback copy reads the file as it loads: a load whose
+run cut short while it watched leaves its watch there: once a manager runs
+again, the next changing run, or `status` run as root (under the lock, when
+free), finds the watched manager gone and the running one started before
+the watch would have ended, and turns the guard off. The fallback copy reads the file as it loads: a load whose
 process started within the watch of the first manager after the bounce, or
 of the one this tool watched, runs as the stock file for the rest of the
 boot (no provisioning fallback, in-place hook or queue order; its hook's
@@ -1721,7 +1732,8 @@ fallback copy (`fallback.manager_runs_copy`); otherwise, or with no manager
 running, its tile is reported hidden (with the retired installer's leftovers,
 which list apps by themselves, the cached flags stand). Provisioning's own section for an app's
 id wins over the fallback: when it disallows the app the tile stays hidden
-(`tile_visible: false`), and the install says so.
+(`tile_visible: false`, and `tile_withheld: true`: the flags the manager
+keeps hide it, so a restart does not show it), and the install says so.
 
 ### The retired installer's leftovers
 
@@ -1794,7 +1806,7 @@ stdout, read-only, taking no lock, of this shape:
   "components": [{ "id", "kind": "tool", "version", "units": [{ "name", "enabled", "active", "journal" }], "provides",
                    "stale": "<what it lacks>"|null, "kept": true },
                  { "id", "kind": "app", "version", "uid", "installationSource", "running",
-                   "tile_provisioned", "tile_fallback", "tile_visible", "stale": "<why>"|null }],
+                   "tile_provisioned", "tile_fallback", "tile_visible", "tile_withheld", "stale": "<why>"|null }],
   "pending_reboot": [{ "id", "reason" }],
   "last_apply": { "at", "results": [{ "id", "action", "version", "ok", "error"?, "log", "rejected"? }] } | null,   (iDrive 8;
                  action "restore": version put back in place of the rejected one)
@@ -1823,10 +1835,12 @@ unchanged, tool layout, pruning and idempotence, pending reboots, restarts
 with their health check and the rollback after a crash loop, `rollback`,
 app-privacy as a tool, the fresh-install and update flows through the
 simulated manager, bounce spacing, the MainApp guard (a manager that dies within the watch
-after a bounce: the run fails, no further bounce or app change, main.js
-unbound, until the next start; one that dies after it: nothing; a watch a
-killed run left, judged at the next status; the copy's guard loaded once
-per start), per-artifact transactions, the stock
+after a bounce: the run stops with exit 3, an install and an uninstall
+through the sh window keeping what they did with no rootfs write after the
+death, no further bounce, app change or app-privacy apply, main.js unbound,
+until the next start; one that dies after it: nothing; a watch a killed
+run left, judged at the next status; the copy's guard loaded once per
+start); a restore that removes an app dropping its record, per-artifact transactions, the stock
 restore, `status --json`, the fallback, the in-place install, update and
 uninstall (the copy built from `fixtures/main.js`, its hook run by
 `fake_inplace.js` as the running manager: installs, updates and uninstalls

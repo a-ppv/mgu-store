@@ -23,7 +23,8 @@
  *   mgu-deploy.sh help
  *
  * Exit codes: 0 done, 1 failed (rolled back where applicable),
- * 2 preflight refused (nothing changed).
+ * 2 preflight refused (nothing changed), 3 stopped by the MainApp guard
+ * (what it changed stays).
  *
  * Without --artifact, install takes every *.tgz in ./artifacts beside
  * this script, tools before apps, the app-privacy tool first. A tool
@@ -559,16 +560,17 @@ function writeGuard(g) {
     chownMaybe(guardFile(), MGR_UID, MGR_UID);
 }
 /* Why the guard is off for this boot, or null. A watch left unfinished is
- * judged here: its manager gone, and none running that started after the
- * watch would have ended, means it died within it. */
+ * judged here: its manager gone, and the one running now started before
+ * the watch would have ended, means it died within it. */
 function guardWhy() {
     if (isId8()) return null;
     var g = readGuard(), w = g.watch;
     if (g.off) return g.off;
     if (!w || w.done || typeof w.start !== 'number' || !g.bounce) return null;
     var m = managerStart(), endsMs = w.start + g.bounce.watchMs;
-    if (m && m.pid === w.pid && (m.started === null || Math.abs(m.started * 1000 - w.start) < 2000)) return null;
-    if (m && m.started !== null && m.started * 1000 >= endsMs) return null;
+    /* no manager running: judged by the start of the one oapcontroller starts next */
+    if (!m || (m.pid === w.pid && (m.started === null || Math.abs(m.started * 1000 - w.start) < 2000))) return null;
+    if (m.started !== null && m.started * 1000 >= endsMs) return null;
     return 'the app manager stopped within ' + Math.round(g.bounce.watchMs / 1000) + 's of its restart by mgu-deploy';
 }
 function guardBounce(pid) {
@@ -589,7 +591,7 @@ function guardWatch(pid) {
         if (managerPid() === pid) continue;
         var why = 'the app manager stopped ' + Math.round(monoS() - from) + 's after mgu-deploy restarted it';
         guardTrip(why);
-        throw fail(why + '; no app changes until the next start of the head unit');
+        guardStop(why);
     }
     g = readGuard();
     if (g.watch && g.watch.pid === pid) { g.watch.done = true; writeGuard(g); }
@@ -609,6 +611,21 @@ function guardTrip(why) {
         say(mainJs() + ' unbound: the app manager starts on it until the next start of the head unit');
     }
     unbindCertCopy();
+}
+/* A trip ends the run where it is, with exit status 3: what it changed
+ * stays, since rolling it back would write / and the app manager's files
+ * while the next manager starts; the next start of the head unit takes it
+ * up. Only onGuardStop, which a step sets while its bounce runs, records
+ * what that step finished (in this tool's own state). */
+var onGuardStop = null;
+function guardStop(why) {
+    if (onGuardStop) {
+        try { onGuardStop(); } catch (e) { warn('not recorded: ' + e.message); }
+    }
+    process.stderr.write('mgu-deploy: ' + why + '; stopped here: what this run changed stays, and app changes wait for ' +
+        'the next start of the head unit\n');
+    releaseLock();
+    process.exit(3);
 }
 function guardRefuse(what) {
     var why = guardWhy();
@@ -2109,7 +2126,7 @@ function tileState(app, fb) {
     }
     if (isId8()) listed = listed && fb.active;
     else if (listed && !retiredBackups().length) visible = visible && fb.manager_runs_copy === true;
-    return { provisioned: visible && !listed, fallback: visible && listed, visible: visible };
+    return { provisioned: visible && !listed, fallback: visible && listed, visible: visible, withheld: !tileFlags(app.entry).visible };
 }
 
 /* ---- internet for selected components ------------------------------------------ */
@@ -2266,8 +2283,14 @@ function restartAgain(units, what) {
 /* app-privacy's apply after its own install or rollback, with the bounce
  * rule of INTEGRATION.md §2. */
 function privacyApplyAndBounce(state) {
-    var tool = privacyTool();
+    var tool = privacyTool(), off = guardWhy();
     if (!fs.existsSync(tool)) return { ok: false, why: 'tool missing at ' + tool };
+    /* the boot run of app-privacy.service applies it at the next start */
+    if (off) {
+        if (state) addPending(state, 'app-privacy', PENDING_NEXT_START);
+        say('app-privacy: applied at the next start of the head unit (' + off + ')');
+        return { ok: true };
+    }
     var r = run(CFG.node, [tool, 'apply', '--json'], { allowFail: true, timeout: 120000 });
     var result = lastJsonLine(r.stdout);
     if (r.status !== 0 || !result) {
@@ -4005,7 +4028,15 @@ function uninstallApp(id, state) {
     if (!r.done) {
         leftovers.push('uid ' + uid + ': the manager\'s own ACL/UI/status records for it stay in place');
         say('uninstalling ' + id + ' through a bounce: ' + r.why);
+        /* a trip keeps the removal: its record and kept packages go, as at its end */
+        onGuardStop = function () {
+            var s = loadState();
+            delete s.apps[id];
+            saveState(s);
+            rmrf(keptDir(id));
+        };
         bounceManager();
+        onGuardStop = null;
     }
     if (fs.existsSync(appEntryFile(id))) throw fail('registry entry still present');
     if (ownDir && fs.existsSync(home)) throw fail('app home still present');
@@ -5812,7 +5843,7 @@ function collectStatus(state) {
         var tile = tileState(app, fb);
         components.push({ id: app.id, kind: 'app', version: app.version, uid: app.uid,
             installationSource: app.installationSource, running: appRunning(app.uid),
-            tile_provisioned: tile.provisioned, tile_fallback: tile.fallback, tile_visible: tile.visible,
+            tile_provisioned: tile.provisioned, tile_fallback: tile.fallback, tile_visible: tile.visible, tile_withheld: tile.withheld,
             previous: isId8() ? null : (keptPrevious(app.id, app.version) || {}).version || null, stale: appStale(app) });
     });
     var backupCount = 0;
@@ -6501,7 +6532,11 @@ function cmdUninstall(args) {
         throw refuse('mgu-deploy: the deploy tool does not uninstall itself; restore puts back what it changed, ' +
             'and ' + DEPLOY_DIR + ' (its state and backups) is removed by hand when wanted');
     }
-    if (id === AM.app && amPresent()) return amCommand('uninstall', amRemove);
+    if (id === AM.app && amPresent()) {
+        guardRefuse('the removal of IterioDev\'s App Manager');
+        return amCommand('uninstall', amRemove);
+    }
+    if (id === 'app-privacy') guardRefuse('the removal of app-privacy');
     var state = loadState();
     var isTool = installedTools().some(function (t) { return t.id === id; });
     if (!isTool && isId8()) return uninstallQueuedId8(id, state);
@@ -6747,6 +6782,7 @@ function cmdRestore(args) {
     var name = args.positional[0] || 'stock';
     var dir = path.join(BACKUPS_DIR, name);
     if (!fs.existsSync(path.join(dir, 'manifest.json'))) throw refuse('no backup named ' + name);
+    guardRefuse('a restore');
     var data = readJson(path.join(dir, 'manifest.json')), state = loadState();
     preflightRestore(name, dir, data);
     confirmYes(args, 'restore from ' + name + ' and remove components it shows as absent');
@@ -6805,7 +6841,10 @@ function cmdRestore(args) {
         if (fbWas.unit_present || fallbackPresent()) settleFallback();
         pruneCreatedDirs(state);
         var removed = appsBefore.filter(function (id) { return !installedApp(id); });
+        /* removed as an uninstall removes them: no record, no kept package */
+        removed.forEach(function (id) { delete state.apps[id]; rmrf(keptDir(id)); });
         if (removed.length) {
+            saveState(state);
             bounceManager();
             say('apps removed: ' + removed.join(', ') + ' (manager-side records are not removed)');
         } else if (reverted) privacyReverted();

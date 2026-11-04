@@ -743,13 +743,13 @@ function testMainAppGuard() {
     let kills = root.kills().length;
     const r = root.run(['fallback', 'on', '--yes'], Object.assign({ FAKE_MGR_CRASH_MS: '400' }, W));
     const crashes = root.managerLog().filter((l) => l.startsWith('crash '));
-    check('guard: a manager that dies within the watch after the bounce fails the run, saying so',
-        r.status === 1 && crashes.length === 1 && r.out.includes('the app manager stopped') &&
-        r.out.includes('no app changes until the next start of the head unit'), r.out);
+    check('guard: a manager that dies within the watch after the bounce stops the run (exit 3), saying so',
+        r.status === 3 && crashes.length === 1 && r.out.includes('the app manager stopped') &&
+        r.out.includes('stopped here: what this run changed stays') && !r.out.includes('rolling back'), r.out);
     check('guard: it is off for this boot in the guard file, and main.js is unbound',
         guardOf(root) && /the app manager stopped/.test(guardOf(root).off) && guardOf(root).boot === 'boot-1' &&
         root.binds().length === 0, `${JSON.stringify(guardOf(root))}\n${JSON.stringify(root.binds())}`);
-    check('guard: no further bounce, the rollback\'s neither, and the rollback binds nothing',
+    check('guard: no further bounce, and nothing binds main.js again',
         root.kills().length === kills + 1 && root.binds().length === 0, `${JSON.stringify(root.kills())}\n${r.out}`);
     kills = root.kills().length;
     const app = root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes']);
@@ -763,7 +763,16 @@ function testMainAppGuard() {
         root.kills().length === kills && root.binds().length === 0 && again.out.includes('is bound to the fallback copy at the next start'), again.out);
     const tool = root.run(['install', '--artifact', toolArtifact('0.2.0'), '--yes']);
     check('guard: tools still install', tool.status === 0, tool.out);
+    const priv = root.run(['install', '--artifact', privacyArtifact(), '--yes']);
     let st = root.status();
+    check('guard: app-privacy is not applied and nothing bounces: its apply waits for the next start, reported pending',
+        priv.status === 0 && priv.out.includes('app-privacy: applied at the next start of the head unit') &&
+        !/^app-privacy: (patched|unpatched)/m.test(priv.out) && root.kills().length === kills &&
+        st.pending_reboot.some((p) => p.id === 'app-privacy'), `${priv.out}\n${JSON.stringify(st.pending_reboot)}`);
+    [['restore', 'stock', '--yes'], ['uninstall', 'app-privacy', '--yes']].forEach((args) => {
+        const x = root.run(args);
+        check(`guard: ${args[0]} ${args[1]} is refused`, x.status === 2 && x.out.includes('waits for the next start of the head unit'), x.out);
+    });
     check('guard: status --json says why', st.mainapp_guard === guardOf(root).off, JSON.stringify(st.mainapp_guard));
     root.reboot(Math.floor(Date.now() / 1000) - 100);
     root.setManagerStart(Date.now() / 1000 - 90);
@@ -795,8 +804,17 @@ function testMainAppGuard() {
     child.kill('SIGKILL');
     // its lock names a pid that is gone (this harness reaps the killed child only later)
     write(root.p('var/opt/mgu-deploy/lock'), '999999 boot-1\n');
-    // the watched manager dies and oapcontroller starts another
     const pid = root.managerPid();
+    // the watched manager gone, none running yet: judged once one runs
+    fs.writeFileSync(`${root.R}.mgr.pid`, '');
+    check('guard: with no manager running, a watch a killed run left is not judged yet', root.status().mainapp_guard === null &&
+        root.binds().length === 1);
+    // oapcontroller starts one after the watch would have ended: the watched one outlived it
+    fs.writeFileSync(`${root.R}.mgr.pid`, String(pid + 2));
+    root.setManagerStart(watched.watch.start / 1000 + 31);
+    check('guard: a manager started after the watch would have ended leaves it on', root.status().mainapp_guard === null &&
+        root.binds().length === 1);
+    // the watched manager died within it: oapcontroller's next one started inside the watch
     fs.writeFileSync(`${root.R}.mgr.pid`, String(pid + 1));
     root.setManagerStart(Date.now() / 1000);
     st = root.status();
@@ -806,6 +824,75 @@ function testMainAppGuard() {
         `${out()}\n${JSON.stringify(watched)}\n${JSON.stringify(st.mainapp_guard)}\n${JSON.stringify(root.binds())}`);
     const after = root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes']);
     check('guard: and app installs are refused', after.status === 2 && after.out.includes('waits for the next start'), after.out);
+}
+
+/* A run the guard stops keeps what it did: nothing through the rootfs
+ * window, the registry, custom_apps.json or app folders after the death;
+ * a stopped removal drops the app's record and kept packages as a finished
+ * one does. A restore that removes an app does the same. */
+function testGuardStops() {
+    const W = { MGU_DEPLOY_GUARD_WATCH_S: '2', FAKE_MGR_CRASH_MS: '400' };
+    const root = bindRoot(false);
+    const mountLog = `${root.R}.mount.log`;
+    const wrapper = `${root.R}.mount.sh`;
+    fs.writeFileSync(wrapper, `#!/bin/sh\necho "$(date +%s%3N) $*" >> '${mountLog}'\nexec '${path.join(HERE, 'fake_mount.sh')}' "$@"\n`, { mode: 0o755 });
+    Object.assign(root.env, { MGU_DEPLOY_FAKE_SH_WINDOW: '1', MGU_DEPLOY_MOUNT: wrapper });
+    const custom = () => readJsonOrNull(root.p(`var/opt/public/oap/oap_${MGR}/data/custom_apps.json`)) || {};
+    const rwAfterCrash = () => {
+        const crash = root.managerLog().filter((l) => l.startsWith('crash ')).map((l) => Number(l.split(' ')[2])).pop();
+        const rw = fs.readFileSync(mountLog, 'utf8').split('\n').filter((l) => / -o remount,rw \/$/.test(l)).map((l) => Number(l.split(' ')[0]));
+        return { crash, rw: rw.filter((t) => t >= crash).length, before: rw.filter((t) => t < crash).length };
+    };
+    const setup = root.run(['install', '--artifact', privacyArtifact(), '--yes']);
+    if (setup.status !== 0) throw new Error(setup.out);
+    const ins = root.run(['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes'], W);
+    let rw = rwAfterCrash();
+    check('guard stop: a first install whose bounce\'s manager dies stops (exit 3), keeping the app: its package, listing and registry entry',
+        ins.status === 3 && !ins.out.includes('rolling back') && fs.existsSync(root.preinstalled('fixture_app', '1.0.0')) &&
+        'fixture_app' in custom() && fs.existsSync(root.entry('fixture_app')), ins.out);
+    check('guard stop: that install wrote nothing to / after the death (its own windows came before), and main.js is unbound',
+        rw.crash > 0 && rw.before > 0 && rw.rw === 0 && root.binds().length === 0, JSON.stringify(rw));
+
+    // the next start; the app installed, then a removal through a bounce whose manager dies
+    root.reboot(Math.floor(Date.now() / 1000) - 100);
+    root.setManagerStart(Date.now() / 1000 - 90);
+    fs.unlinkSync(`${root.R}.mgr.pid.crashed`);
+    const done = root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes']);
+    if (done.status !== 0) throw new Error(done.out);
+    root.setManagerStart(Date.now() / 1000 - 90);
+    const kept = root.p('var/opt/mgu-deploy/kept/fixture_app');
+    const keptBefore = fs.existsSync(kept);
+    const un = root.run(['uninstall', 'fixture_app', '--yes'], W);
+    rw = rwAfterCrash();
+    const st = root.status();
+    check('guard stop: a removal whose bounce\'s manager dies stops (exit 3), the app removed, nothing written to / after the death',
+        un.status === 3 && !un.out.includes('rolling back') && !fs.existsSync(root.entry('fixture_app')) &&
+        !fs.existsSync(root.preinstalled('fixture_app', '1.1.0')) && !('fixture_app' in custom()) && rw.rw === 0, `${un.out}\n${JSON.stringify(rw)}`);
+    check('guard stop: the stopped removal drops the app\'s record and kept packages: not a lost app',
+        keptBefore && !fs.existsSync(kept) && !('fixture_app' in root.state().apps) && st.lost_apps.length === 0,
+        `${JSON.stringify(root.state().apps)} ${JSON.stringify(st.lost_apps)}`);
+
+    // restore removes an app: its record and kept packages go too
+    const r2 = fakeRoot();
+    r2.run(['install', '--artifact', privacyArtifact(), '--yes']);
+    r2.run(['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
+    // the app install's own snapshot: app-privacy installed, the app absent
+    const snap = fs.readdirSync(r2.p('var/opt/mgu-deploy/backups')).filter((d) => /-install$/.test(d)).sort().pop();
+    const res = r2.run(['restore', snap, '--yes']);
+    const st2 = r2.status();
+    check('restore: an app it removes loses its record and kept packages, so it is not a lost app',
+        res.status === 0 && !fs.existsSync(r2.entry('fixture_app')) && !('fixture_app' in ((r2.state() || {}).apps || {})) &&
+        !fs.existsSync(r2.p('var/opt/mgu-deploy/kept/fixture_app')) && st2.lost_apps.length === 0, `${res.out}\n${JSON.stringify(st2.lost_apps)}`);
+
+    // an uninstall that fails after the home went is rolled back: record, kept package and registry entry stay
+    const r3 = fakeRoot();
+    r3.run(['install', '--artifact', privacyArtifact(), '--yes']);
+    r3.run(['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
+    const f = r3.run(['uninstall', 'fixture_app', '--yes'], { FAKE_MGR_STAY_DOWN_AT: String(r3.kills().length + 1) });
+    const st3 = r3.status();
+    check('uninstall rolled back: the registry entry is back and the app is no lost app',
+        f.status === 1 && fs.existsSync(r3.entry('fixture_app')) && 'fixture_app' in r3.state().apps && st3.lost_apps.length === 0,
+        `${f.out}\n${JSON.stringify(st3.lost_apps)}`);
 }
 
 /* The guard in a copy of the iDrive 7 fixture, loaded as MainApp loads it,
@@ -7831,6 +7918,7 @@ const SUITES = [
     testApps,
     testBounceGuard,
     testMainAppGuard,
+    testGuardStops,
     testGuardCopy,
     testNoManagerInstall,
     testDefaultCodingInstall,
