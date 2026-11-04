@@ -6,42 +6,42 @@
   "unit": "id7",
   "emulator": "deb756780bddf43178501ea43b40b952e04d7df2",
   "artifactSha256": "ec50fdf990a32678d4072748794d4e7d6f1ddb8e340067beb8184165094d6c57",
-  "minutes": 7.6,
+  "minutes": 6.3,
   "cases": [
     {
       "name": "installed on its own over the published release",
       "ok": true,
-      "detail": "robertn_store 0.9.22 updated in place by the app manager (pid 866) as uid 12204 (source PREINSTALLED)"
+      "detail": "robertn_store 0.9.22 updated in place by the app manager (pid 868) as uid 12204 (source PREINSTALLED)"
     },
     {
       "name": "after the head-unit restart, the Store in its page (embed)",
       "ok": true,
-      "detail": "in front, 652 colours"
+      "detail": "in front, 642 colours"
     },
     {
       "name": "renderer restarted, the Store on its own layer",
       "ok": true,
-      "detail": "in front, 190 colours, layers 0x64 0x4d520000"
+      "detail": "in front, 649 colours, layers 0x64 0x4d520000"
     },
     {
       "name": "another program sets the screen's layers without ours while shown",
       "ok": true,
-      "detail": "in front, 190 colours, layers 0x64 0x4d520000"
+      "detail": "in front, 649 colours, layers 0x64 0x4d520000"
     },
     {
       "name": "the Store opened again",
       "ok": true,
-      "detail": "in front, 663 colours, layers 0x64 0x4d520000"
+      "detail": "in front, 649 colours, layers 0x64 0x4d520000"
     },
     {
       "name": "a client open since before adds its layer while shown; ours back, its layer kept",
       "ok": true,
-      "detail": "in front, 663 colours, layers 0x64 0x4d47fff0 0x4d520000"
+      "detail": "in front, 649 colours, layers 0x64 0x4d47fff0 0x4d520000"
     },
     {
       "name": "renderer restarted while the Store shows",
       "ok": true,
-      "detail": "in front, 663 colours, layers 0x64 0x4d47fff0 0x4d520000"
+      "detail": "in front, 649 colours, layers 0x64 0x4d47fff0 0x4d520000"
     }
   ]
 }
