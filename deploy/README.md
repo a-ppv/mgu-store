@@ -1034,8 +1034,9 @@ gives an app's `previous` (null on iDrive 8, where it is refused).
 installed version's package is kept, as oapcontroller's wipe leaves them;
 none while another run holds the lock. The updater installs them again
 from that package. An uninstall (also one the MainApp guard stopped) and a
-restore that removes an app drop both the app's record and its kept
-packages, so an app removed on purpose is never one. An uninstall that
+restore that removes an app (once its bounce is done or stopped) drop
+both the app's record and its kept packages, so an app removed on purpose
+is never one. An uninstall that
 fails and is rolled back keeps both, and its registry entry is back.
 
 ### app-privacy
@@ -1114,8 +1115,17 @@ One that dies before turns the guard off for the rest of the boot:
   changed stays`). Nothing is rolled back: that would write `/`, the
   registry, `custom_apps.json` and app folders while the next manager
   starts. What it placed and listed is taken up at the next start of the
-  head unit; an app removal it stopped counts as done (its record and kept
-  packages go);
+  head unit. Only this tool's own records follow what the run did: an app
+  install stopped once its package is placed records that version and keeps
+  its package; an app removal or a restore's removal stopped counts as done
+  (the app's record and kept packages go); a reinstall stopped (an app
+  rollback, an install afresh) keeps the app's record at the version it was
+  going to, with that package, and its data folder: put into the app's
+  home when the app is installed, else recorded in `state.json`
+  (`data_stash`) and carried over by the app's next install, which the
+  updater makes as it finds the app lost; a boot check (`verify`) stopped
+  records its outcome and exits 0. An unmount that fails is said and the
+  run still stops;
 - `main.js` and `CertificateManager.js` are unbound, so the next manager
   starts on the files under them as they are. Until the next start nothing
   binds them again, nothing bounces, and app-privacy is not applied: an
@@ -1835,9 +1845,12 @@ unchanged, tool layout, pruning and idempotence, pending reboots, restarts
 with their health check and the rollback after a crash loop, `rollback`,
 app-privacy as a tool, the fresh-install and update flows through the
 simulated manager, bounce spacing, the MainApp guard (a manager that dies within the watch
-after a bounce: the run stops with exit 3, an install and an uninstall
-through the sh window keeping what they did with no rootfs write after the
-death, no further bounce, app change or app-privacy apply, main.js unbound,
+after a bounce: the run stops with exit 3, an install, an update and an
+uninstall through the sh window keeping what they did with no rootfs write
+after the death and their records following it, a rollback stopped in its
+removal or its install keeping the record, kept package and data that the
+next install completes, a restore stopped or failing, an unmount that
+fails, a boot check stopped, no further bounce, app change or app-privacy apply, main.js unbound,
 until the next start; one that dies after it: nothing; a watch a killed
 run left, judged at the next status; the copy's guard loaded once per
 start); a restore that removes an app dropping its record, per-artifact transactions, the stock

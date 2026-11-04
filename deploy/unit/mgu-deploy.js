@@ -603,29 +603,52 @@ function guardTrip(why) {
     var g = readGuard();
     if (!g.off) {
         g.off = why;
-        writeGuard(g);
+        try { writeGuard(g); } catch (e) { warn('the guard file is not written: ' + e.message); }
         warn(why + ': no app changes and no restart of the app manager until the next start of the head unit');
     }
-    while (binds() && bindMounted(mainJs())) {
-        runOk(CFG.umount, [mainJs()]);
-        say(mainJs() + ' unbound: the app manager starts on it until the next start of the head unit');
-    }
-    unbindCertCopy();
+    /* never throws: a caller's rollback must not follow */
+    try {
+        while (binds() && bindMounted(mainJs())) {
+            runOk(CFG.umount, [mainJs()]);
+            say(mainJs() + ' unbound: the app manager starts on it until the next start of the head unit');
+        }
+    } catch (e) { warn(mainJs() + ' stays bound: ' + e.message); }
+    try { unbindCertCopy(); } catch (e) { warn(certManagerJs() + ' stays bound: ' + e.message); }
 }
-/* A trip ends the run where it is, with exit status 3: what it changed
- * stays, since rolling it back would write / and the app manager's files
- * while the next manager starts; the next start of the head unit takes it
- * up. Only onGuardStop, which a step sets while its bounce runs, records
- * what that step finished (in this tool's own state). */
-var onGuardStop = null;
+/* A trip ends the run where it is, with exit status 3 (guardExit): what
+ * it changed stays, since rolling it back would write / and the app
+ * manager's files while the next manager starts; the next start of the head
+ * unit, and the updater's reinstall of a lost app, take it up. The steps a
+ * run is inside (onGuardStop, innermost first) bring this tool's own
+ * records to what they did, and nothing else. */
+var guardSteps = [], guardExit = 3;
+function onGuardStop(record, body) {
+    guardSteps.push(record);
+    try { return body(); } finally { guardSteps.pop(); }
+}
 function guardStop(why) {
-    if (onGuardStop) {
-        try { onGuardStop(); } catch (e) { warn('not recorded: ' + e.message); }
-    }
+    guardSteps.slice().reverse().forEach(function (record) {
+        try { record(); } catch (e) { warn('not recorded: ' + e.message); }
+    });
     process.stderr.write('mgu-deploy: ' + why + '; stopped here: what this run changed stays, and app changes wait for ' +
         'the next start of the head unit\n');
     releaseLock();
-    process.exit(3);
+    process.exit(guardExit);
+}
+/* The app's record (state.json apps) at version, its uid the registry's
+ * when it has one, and that version's package kept: a later loss of the
+ * app installs that version again. */
+function recordApp(id, version, file) {
+    var s = loadState(), e = readJsonOrNull(appEntryFile(id));
+    s.apps[id] = { uid: e && e.userId ? e.userId : (s.apps[id] || {}).uid || null, version: version };
+    saveState(s);
+    if (file && !fs.existsSync(keptFile(id, version))) keepPackage({ id: id, version: version, file: file });
+}
+function dropAppRecord(id) {
+    var s = loadState();
+    delete s.apps[id];
+    saveState(s);
+    rmrf(keptDir(id));
 }
 function guardRefuse(what) {
     var why = guardWhy();
@@ -2103,6 +2126,12 @@ function appRunning(uid) {
  * "-enabled"/"-allowed" there state whether the tile shows. The fallback
  * supplies them only for an app provisioning does not name: provisioning's
  * own section for the same id (BMW's "store", say) wins and can hide it. */
+/* The flags the manager keeps for the app hide its tile: provisioning
+ * withholds it, which a restart does not change. */
+function tileWithheld(entry) {
+    var t = tileFlags(entry);
+    return t.allowed === 'false' || t.enabled === 'false';
+}
 function tileFlags(entry) {
     var cache = (entry && entry.provisioningCache) || {};
     return { visible: cache['-enabled'] === 'true' && cache['-allowed'] === 'true',
@@ -2126,7 +2155,7 @@ function tileState(app, fb) {
     }
     if (isId8()) listed = listed && fb.active;
     else if (listed && !retiredBackups().length) visible = visible && fb.manager_runs_copy === true;
-    return { provisioned: visible && !listed, fallback: visible && listed, visible: visible, withheld: !tileFlags(app.entry).visible };
+    return { provisioned: visible && !listed, fallback: visible && listed, visible: visible, withheld: tileWithheld(app.entry) };
 }
 
 /* ---- internet for selected components ------------------------------------------ */
@@ -2957,7 +2986,12 @@ function cmdVerify() {
     var left = {};
     Object.keys(v).forEach(function (id) { if (due.indexOf(id) < 0) left[id] = v[id]; });
     writeVerify(left);
-    var results = [];
+    var results = [], last = function () {
+        writeAtomic(VERIFY_LAST, JSON.stringify({ at: new Date().toISOString(), results: results }, null, 2) + '\n', 0o644);
+    };
+    /* a rollback the MainApp guard stops leaves what it did; the unit still ends as succeeded */
+    guardExit = 0;
+    guardSteps.push(last);
     due.forEach(function (id) {
         var e = v[id], t = installedTools().filter(function (x) { return x.id === id; })[0], why;
         if (!t || t.version !== e.version) {
@@ -2975,7 +3009,8 @@ function cmdVerify() {
             r.rolledBack = true;
         } catch (err) { process.stderr.write(id + ': the rollback to ' + e.previous + ' failed: ' + err.message + '\n'); }
     });
-    writeAtomic(VERIFY_LAST, JSON.stringify({ at: new Date().toISOString(), results: results }, null, 2) + '\n', 0o644);
+    guardSteps.pop();
+    last();
     /* exit 0 either way: the boot unit never reads as failed */
     return 0;
 }
@@ -3887,58 +3922,81 @@ function setUpElsewhere(a, existing, stage) {
     var why = appStale(existing);
     return why ? { why: why, artifact: a.prepare ? prepareApp(a, stage) : a } : null;
 }
-/* Uninstalls app (installedApp's), then installs file; its data folder goes
- * to the new install's home. When that install fails, again (a package, or
- * null) is installed instead, the data going there. Returns the failed
- * install's error, or null. */
-function reinstallApp(app, file, again) {
+/* Moves the data folder set aside at stash into app id's home as installed
+ * now, what was oldUid's (and oldGid's) becoming the new uid's (and the
+ * new folder's group). True when moved. */
+function carryData(id, stash, oldUid, oldGid) {
+    var now = installedApp(id);
+    if (!now || !fs.existsSync(stash)) return false;
+    /* Under another uid, while the folder is still out of the new home
+     * where no process of the new uid reaches it. Links are left alone:
+     * chown follows them. */
+    var dest = path.join(appHome(now.uid), 'data'), st = lstatOrNull(dest) || lstatOrNull(appHome(now.uid));
+    if (st && now.uid !== oldUid) {
+        walk(stash, '', []).concat([{ path: stash, stat: fs.lstatSync(stash) }]).forEach(function (e) {
+            if (e.stat.isSymbolicLink()) return;
+            var u = e.stat.uid === oldUid ? now.uid : e.stat.uid, g = e.stat.gid === oldGid ? st.gid : e.stat.gid;
+            if (u !== e.stat.uid || g !== e.stat.gid) chownMaybe(e.path, u, g);
+        });
+    }
+    rmrf(dest);
+    fs.renameSync(stash, dest);
+    say(id + "'s data carried over");
+    return true;
+}
+/* After an install of id: a data folder a stopped reinstall left aside
+ * (state.json data_stash) goes into its home. */
+function carryStash(id, state) {
+    var d = state.data_stash && state.data_stash[id];
+    if (!d) return;
+    if (!carryData(id, d.path, d.uid, d.gid) && fs.existsSync(d.path)) say(id + "'s data stays in " + d.path);
+    else delete state.data_stash[id];
+}
+/* Uninstalls app (installedApp's), then installs file (at version); its
+ * data folder goes to the new install's home. When that install fails,
+ * again (a package, or null) is installed instead, the data going there.
+ * Returns the failed install's error, or null. A trip on the way keeps the
+ * app's record at version, with its kept package, so the next start
+ * installs it again, and the data folder: carried over when the app is
+ * installed, else recorded (data_stash) for that install. */
+function reinstallApp(app, file, again, version) {
     var id = app.id;
     /* beside the homes: the same filesystem as the data folder */
     var data = path.join(appHome(app.uid), 'data'), stash = path.join(CFG.oap, '.mgu-deploy-data-' + id + '-' + process.pid);
     var oldGid = (lstatOrNull(data) || {}).gid;
     if (fs.existsSync(data)) fs.renameSync(data, stash);
-    /* Under another uid, what was the old uid's or the old data folder's
-     * group becomes the new uid's or the new folder's group, while the
-     * folder is still out of the new home where no process of the new uid
-     * reaches it. Links are left alone: chown follows them. */
     var putBack = function () {
-        var now = installedApp(id);
-        if (!now || !fs.existsSync(stash)) {
-            if (fs.existsSync(stash)) say(id + "'s data stays in " + stash);
-            return;
-        }
-        var dest = path.join(appHome(now.uid), 'data'), st = lstatOrNull(dest) || lstatOrNull(appHome(now.uid));
-        if (st && now.uid !== app.uid) {
-            walk(stash, '', []).concat([{ path: stash, stat: fs.lstatSync(stash) }]).forEach(function (e) {
-                if (e.stat.isSymbolicLink()) return;
-                var u = e.stat.uid === app.uid ? now.uid : e.stat.uid, g = e.stat.gid === oldGid ? st.gid : e.stat.gid;
-                if (u !== e.stat.uid || g !== e.stat.gid) chownMaybe(e.path, u, g);
-            });
-        }
-        rmrf(dest);
-        fs.renameSync(stash, dest);
-        say(id + "'s data carried over");
+        if (!carryData(id, stash, app.uid, oldGid) && fs.existsSync(stash)) say(id + "'s data stays in " + stash);
     };
-    try {
-        cmdUninstall({ positional: [id], keepPackages: true });
-    } catch (e) {
-        if (installedApp(id) && fs.existsSync(stash) && !fs.existsSync(data)) fs.renameSync(stash, data);
-        throw e;
-    }
-    var err = null;
-    try {
-        cmdInstall({ artifacts: [file], positional: [] });
-    } catch (e) {
-        err = e;
-        process.stderr.write(id + ' did not install: ' + e.message + '\n');
-        if (again && fs.existsSync(again)) {
-            say('installing ' + id + ' ' + app.version + ' again');
-            try { cmdInstall({ artifacts: [again], positional: [] }); }
-            catch (e2) { process.stderr.write(id + ' ' + app.version + ' did not install either: ' + e2.message + '\n'); }
+    return onGuardStop(function () {
+        if (!installedApp(id)) recordApp(id, version, fs.existsSync(keptFile(id, version)) ? null : file);
+        if (carryData(id, stash, app.uid, oldGid) || !fs.existsSync(stash)) return;
+        var s = loadState();
+        s.data_stash = Object.assign({}, s.data_stash);
+        s.data_stash[id] = { path: stash, uid: app.uid, gid: oldGid };
+        saveState(s);
+    }, function () {
+        try {
+            cmdUninstall({ positional: [id], keepPackages: true });
+        } catch (e) {
+            if (installedApp(id) && fs.existsSync(stash) && !fs.existsSync(data)) fs.renameSync(stash, data);
+            throw e;
         }
-    }
-    putBack();
-    return err;
+        var err = null;
+        try {
+            cmdInstall({ artifacts: [file], positional: [] });
+        } catch (e) {
+            err = e;
+            process.stderr.write(id + ' did not install: ' + e.message + '\n');
+            if (again && fs.existsSync(again)) {
+                say('installing ' + id + ' ' + app.version + ' again');
+                try { cmdInstall({ artifacts: [again], positional: [] }); }
+                catch (e2) { process.stderr.write(id + ' ' + app.version + ' did not install either: ' + e2.message + '\n'); }
+            }
+        }
+        putBack();
+        return err;
+    });
 }
 
 /* ---- uninstall -------------------------------------------------------------- */
@@ -3998,7 +4056,7 @@ function uninstallInPlace(id, version) {
  * uninstalls it in place; whatever it leaves goes after. Without that, one
  * bounce comes last, so the manager never sees the app listed without its
  * package (it would ask the backend for it) nor reinstalls it in between. */
-function uninstallApp(id, state) {
+function uninstallApp(id, state, keepPackages) {
     var entry = readJsonOrNull(appEntryFile(id));
     if (!entry || !entry.userId) throw refuse(id + ': no registry entry');
     var uid = entry.userId, home = appHome(uid);
@@ -4028,15 +4086,9 @@ function uninstallApp(id, state) {
     if (!r.done) {
         leftovers.push('uid ' + uid + ': the manager\'s own ACL/UI/status records for it stay in place');
         say('uninstalling ' + id + ' through a bounce: ' + r.why);
-        /* a trip keeps the removal: its record and kept packages go, as at its end */
-        onGuardStop = function () {
-            var s = loadState();
-            delete s.apps[id];
-            saveState(s);
-            rmrf(keptDir(id));
-        };
-        bounceManager();
-        onGuardStop = null;
+        /* a trip keeps the removal: its record and kept packages go, as at
+         * its end, unless they are kept for the install that follows */
+        onGuardStop(function () { if (!keepPackages) dropAppRecord(id); }, bounceManager);
     }
     if (fs.existsSync(appEntryFile(id))) throw fail('registry entry still present');
     if (ownDir && fs.existsSync(home)) throw fail('app home still present');
@@ -6223,7 +6275,7 @@ function cmdInstall(args) {
             var app = installedApp(r.id);
             if (!app) return;
             say('installing ' + r.id + ' ' + app.version + ' afresh: ' + r.why);
-            var err = reinstallApp(app, r.file, keptFile(r.id, app.version));
+            var err = reinstallApp(app, r.file, keptFile(r.id, app.version), app.version);
             if (err) failed.push(r.id + ': ' + err.message);
             else say(r.id + ' ' + app.version + ' installed afresh');
         } catch (e) { failed.push(r.id + ': ' + e.message); } finally { rmrf(r.file); }
@@ -6370,8 +6422,13 @@ function installRun(args, afresh) {
                 else if (id8) installAppId8(a, state, decisions[a.id], backup);
                 else {
                     keepInstalledPackage(a.id);
-                    installApp(a, state, decisions[a.id]);
+                    /* a trip once its package is placed records this version: listed, the
+                     * next start installs it, and a later loss installs it again */
+                    onGuardStop(function () {
+                        if (fs.existsSync(path.join(preinstalledDir(), a.id + '@' + a.version + '.tgz'))) recordApp(a.id, a.version, a.file);
+                    }, function () { installApp(a, state, decisions[a.id]); });
                     keepPackage(a);
+                    carryStash(a.id, state);
                 }
                 syncDropIns();
                 /* a tool's earlier current folder stays until here, for a rollback */
@@ -6551,7 +6608,7 @@ function cmdUninstall(args) {
     }
     var backup = takeSnapshot('uninstall', touchedForUninstall(id));
     try {
-        if (isTool) { uninstallTool(id, state); dropVerify(id); } else uninstallApp(id, state);
+        if (isTool) { uninstallTool(id, state); dropVerify(id); } else uninstallApp(id, state, args.keepPackages);
         if (!args.keepPackages) rmrf(keptDir(id));
         if (isTool && state.tools) delete state.tools[id];
         if (isTool && state.deactivated) delete state.deactivated[id];
@@ -6773,7 +6830,7 @@ function rollbackAppCmd(id) {
     var prev = keptPrevious(id, app.version), cur = keptFile(id, app.version);
     if (!prev) throw refuse(id + ' ' + app.version + ': no earlier version is kept to roll back to');
     say('rolling back ' + id + ' ' + app.version + ' -> ' + prev.version);
-    var err = reinstallApp(app, prev.file, cur);
+    var err = reinstallApp(app, prev.file, cur, prev.version);
     if (err) throw fail(id + ': the rollback to ' + prev.version + ' failed: ' + err.message);
     say(id + ' rolled back to ' + prev.version);
     return 0;
@@ -6841,11 +6898,11 @@ function cmdRestore(args) {
         if (fbWas.unit_present || fallbackPresent()) settleFallback();
         pruneCreatedDirs(state);
         var removed = appsBefore.filter(function (id) { return !installedApp(id); });
-        /* removed as an uninstall removes them: no record, no kept package */
-        removed.forEach(function (id) { delete state.apps[id]; rmrf(keptDir(id)); });
         if (removed.length) {
-            saveState(state);
-            bounceManager();
+            /* removed as an uninstall removes them, once its bounce is done or
+             * stopped: no record, no kept package */
+            onGuardStop(function () { removed.forEach(dropAppRecord); }, bounceManager);
+            removed.forEach(function (id) { delete state.apps[id]; rmrf(keptDir(id)); });
             say('apps removed: ' + removed.join(', ') + ' (manager-side records are not removed)');
         } else if (reverted) privacyReverted();
         if (!lstatOrNull(privacyCurrent)) {

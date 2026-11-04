@@ -26,7 +26,8 @@
  * provisioning pass (startupPass) on its own, as MainApp does once
  * provisioning reaches it.
  * With $FAKE_MGR_STAY_DOWN_AT set to n, the n-th kill respawns nothing.
- * With $FAKE_MGR_CRASH_MS set, the child the first kill respawns dies that
+ * With $FAKE_MGR_CRASH_MS set, the child the first kill respawns (the
+ * $FAKE_MGR_CRASH_AT-th kill, counted from the first, when set) dies that
  * many ms after its start and oapcontroller starts another (the next pid),
  * logged as "crash <pid> <time in ms>".
  * With $FAKE_MGR_REJECT set, a fresh install is rejected (a manifest naming
@@ -218,7 +219,7 @@ function bounce() {
         `${pid} (node) S 1 ${pid} ${pid} 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 ${ticks} 0 0\n`);
     fs.writeFileSync(env.FAKE_MGR_PIDFILE, String(pid));
     const crashed = `${env.FAKE_MGR_PIDFILE}.crashed`;
-    if (env.FAKE_MGR_CRASH_MS && !fs.existsSync(crashed)) {
+    if (env.FAKE_MGR_CRASH_MS && !fs.existsSync(crashed) && (!env.FAKE_MGR_CRASH_AT || killsBefore() === Number(env.FAKE_MGR_CRASH_AT))) {
         fs.writeFileSync(crashed, '');
         cp.spawn(process.execPath, [__filename, '--crash', String(pid)], { detached: true, stdio: 'ignore' }).unref();
     }

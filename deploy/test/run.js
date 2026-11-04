@@ -852,14 +852,33 @@ function testGuardStops() {
         'fixture_app' in custom() && fs.existsSync(root.entry('fixture_app')), ins.out);
     check('guard stop: that install wrote nothing to / after the death (its own windows came before), and main.js is unbound',
         rw.crash > 0 && rw.before > 0 && rw.rw === 0 && root.binds().length === 0, JSON.stringify(rw));
+    const keptFile = (v) => root.p(`var/opt/mgu-deploy/kept/fixture_app/fixture_app@${v}.tgz`);
+    check('guard stop: the stopped install records the app and keeps its package, so a later loss is repaired',
+        root.state().apps.fixture_app && root.state().apps.fixture_app.version === '1.0.0' && fs.existsSync(keptFile('1.0.0')),
+        JSON.stringify(root.state().apps));
+    const nextStart = () => {
+        root.reboot(Math.floor(Date.now() / 1000) - 100);
+        root.setManagerStart(Date.now() / 1000 - 90);
+        fs.unlinkSync(`${root.R}.mgr.pid.crashed`);
+    };
 
-    // the next start; the app installed, then a removal through a bounce whose manager dies
-    root.reboot(Math.floor(Date.now() / 1000) - 100);
-    root.setManagerStart(Date.now() / 1000 - 90);
-    fs.unlinkSync(`${root.R}.mgr.pid.crashed`);
-    const done = root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes']);
-    if (done.status !== 0) throw new Error(done.out);
-    root.setManagerStart(Date.now() / 1000 - 90);
+    // the next start; an update stopped before its package is placed keeps the version installed
+    nextStart();
+    const pre = root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes'],
+        Object.assign({ FAKE_MGR_CRASH_AT: String(root.kills().length + 1) }, W));
+    check('guard stop: an update stopped before its package is placed keeps the installed version recorded',
+        pre.status === 3 && root.state().apps.fixture_app.version === '1.0.0' && !fs.existsSync(root.preinstalled('fixture_app', '1.1.0')),
+        `${pre.out}\n${JSON.stringify(root.state().apps)}`);
+    // the next start; stopped after its package was placed, it records the new version
+    nextStart();
+    const upd = root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes'],
+        Object.assign({ FAKE_MGR_CRASH_AT: String(root.kills().length + 2) }, W));
+    check('guard stop: an update stopped after its package was placed records the new version and keeps its package',
+        upd.status === 3 && root.state().apps.fixture_app.version === '1.1.0' && fs.existsSync(keptFile('1.1.0')) &&
+        fs.existsSync(root.preinstalled('fixture_app', '1.1.0')), `${upd.out}\n${JSON.stringify(root.state().apps)}`);
+
+    // the next start, then a removal through a bounce whose manager dies
+    nextStart();
     const kept = root.p('var/opt/mgu-deploy/kept/fixture_app');
     const keptBefore = fs.existsSync(kept);
     const un = root.run(['uninstall', 'fixture_app', '--yes'], W);
@@ -872,7 +891,24 @@ function testGuardStops() {
         keptBefore && !fs.existsSync(kept) && !('fixture_app' in root.state().apps) && st.lost_apps.length === 0,
         `${JSON.stringify(root.state().apps)} ${JSON.stringify(st.lost_apps)}`);
 
-    // restore removes an app: its record and kept packages go too
+    // restore removes an app: its record and kept packages go too, once its bounce is done
+    const restoreRoot = () => {
+        const x = fakeRoot();
+        x.run(['install', '--artifact', privacyArtifact(), '--yes']);
+        x.run(['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
+        x.snap = fs.readdirSync(x.p('var/opt/mgu-deploy/backups')).filter((d) => /-install$/.test(d)).sort().pop();
+        return x;
+    };
+    const rf = restoreRoot();
+    const rfr = rf.run(['restore', rf.snap, '--yes'], { FAKE_MGR_STAY_DOWN_AT: String(rf.kills().length + 1) });
+    check('restore: when its bounce fails it rolls back, the app\'s record and kept package with it',
+        rfr.status === 1 && fs.existsSync(rf.entry('fixture_app')) && 'fixture_app' in rf.state().apps &&
+        fs.existsSync(rf.p('var/opt/mgu-deploy/kept/fixture_app/fixture_app@1.0.0.tgz')), rfr.out);
+    const rt = restoreRoot();
+    const rtr = rt.run(['restore', rt.snap, '--yes'], W);
+    check('restore: when its bounce is stopped by the guard the removal stands, record and kept package gone',
+        rtr.status === 3 && !fs.existsSync(rt.entry('fixture_app')) && !('fixture_app' in rt.state().apps) &&
+        !fs.existsSync(rt.p('var/opt/mgu-deploy/kept/fixture_app')) && rt.status().lost_apps.length === 0, rtr.out);
     const r2 = fakeRoot();
     r2.run(['install', '--artifact', privacyArtifact(), '--yes']);
     r2.run(['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
@@ -893,6 +929,118 @@ function testGuardStops() {
     check('uninstall rolled back: the registry entry is back and the app is no lost app',
         f.status === 1 && fs.existsSync(r3.entry('fixture_app')) && 'fixture_app' in r3.state().apps && st3.lost_apps.length === 0,
         `${f.out}\n${JSON.stringify(st3.lost_apps)}`);
+}
+
+/* A trip inside a reinstall (an app rollback, an install afresh): its
+ * removal or its install stopped keeps the app's record at the version it
+ * was going to, with its kept package, and the data folder: carried over
+ * when the app is installed, else recorded for the install the updater
+ * makes at the next start, which carries it over. */
+function testGuardNested() {
+    const W = { MGU_DEPLOY_GUARD_WATCH_S: '2', FAKE_MGR_CRASH_MS: '400' };
+    const nested = () => {
+        const root = fakeRoot();
+        root.run(['install', '--artifact', privacyArtifact(), '--yes']);
+        root.run(['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
+        const up = root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes']);
+        if (up.status !== 0) throw new Error(up.out);
+        const uid = readJson(root.entry('fixture_app')).userId;
+        write(path.join(root.home(uid), 'data', 'note.txt'), 'kept data\n');
+        root.kept = root.p('var/opt/mgu-deploy/kept/fixture_app/fixture_app@1.0.0.tgz');
+        return root;
+    };
+    const dataOf = (root) => {
+        const e = readJsonOrNull(root.entry('fixture_app'));
+        const f = e && path.join(root.home(e.userId), 'data', 'note.txt');
+        return f && fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null;
+    };
+
+    // the rollback's removal stopped
+    let root = nested();
+    let r = root.run(['rollback', 'fixture_app', '--yes'], Object.assign({ FAKE_MGR_CRASH_AT: String(root.kills().length + 1) }, W));
+    let st = root.status();
+    const stash = (root.state().data_stash || {}).fixture_app;
+    check('guard nested: a rollback whose removal is stopped keeps the record at the version it goes to, with its kept package',
+        r.status === 3 && !fs.existsSync(root.entry('fixture_app')) && root.state().apps.fixture_app.version === '1.0.0' &&
+        fs.existsSync(root.kept) && st.lost_apps.length === 1 && st.lost_apps[0].version === '1.0.0',
+        `${r.out}\n${JSON.stringify(root.state().apps)}\n${JSON.stringify(st.lost_apps)}`);
+    check('guard nested: and records where the data folder waits', stash && fs.existsSync(path.join(stash.path, 'note.txt')),
+        JSON.stringify(root.state().data_stash));
+    // the next start: the updater's reinstall of the lost app, from a copy of its kept package
+    root.reboot(Math.floor(Date.now() / 1000) - 100);
+    root.setManagerStart(Date.now() / 1000 - 90);
+    const copy = path.join(fs.mkdtempSync(path.join(T, 'lost-')), 'fixture_app@1.0.0.tgz');
+    fs.copyFileSync(st.lost_apps[0].package, copy);
+    r = root.run(['install', '--artifact', copy, '--yes']);
+    check('guard nested: the reinstall of the lost app completes the rollback, its data carried over, nothing left recorded',
+        r.status === 0 && readJson(path.join(root.home(readJson(root.entry('fixture_app')).userId), 'source/package.json')).version === '1.0.0' &&
+        dataOf(root) === 'kept data\n' && !(root.state().data_stash || {}).fixture_app && !fs.existsSync(stash.path) &&
+        root.status().lost_apps.length === 0, r.out);
+
+    // the rollback's install stopped: the app registered at the version it goes to
+    root = nested();
+    r = root.run(['rollback', 'fixture_app', '--yes'], Object.assign({ FAKE_MGR_CRASH_AT: String(root.kills().length + 2) }, W));
+    st = root.status();
+    check('guard nested: a rollback whose install is stopped keeps the app at that version, its data carried over',
+        r.status === 3 && fs.existsSync(root.entry('fixture_app')) && root.state().apps.fixture_app.version === '1.0.0' &&
+        fs.existsSync(root.kept) && dataOf(root) === 'kept data\n' && !(root.state().data_stash || {}).fixture_app &&
+        st.lost_apps.length === 0, `${r.out}\n${JSON.stringify(root.state())}`);
+}
+
+/* The guard's own failures and boot runs. */
+function testGuardEdges() {
+    const W = { MGU_DEPLOY_GUARD_WATCH_S: '2', FAKE_MGR_CRASH_MS: '400' };
+    // an unmount that fails: still recorded, still stopped with exit 3, nothing rolled back
+    const root = bindRoot(false);
+    root.run(['install', '--artifact', privacyArtifact(), '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
+    // the unmount fails once the guard is off (the trip's)
+    const bad = `${root.R}.umount-fails.sh`;
+    fs.writeFileSync(bad, `#!/bin/sh\nif grep -q '"off"' '${root.p(`var/opt/public/oap/oap_${MGR}/data/mgu-deploy-guard.json`)}' 2>/dev/null; then ` +
+        `echo "umount: busy" >&2; exit 32; fi\nexec '${path.join(HERE, 'fake_umount.sh')}' "$@"\n`, { mode: 0o755 });
+    const r = root.run(['fallback', 'on', '--yes'], Object.assign({ MGU_DEPLOY_UMOUNT: bad }, W));
+    const g = readJsonOrNull(root.p(`var/opt/public/oap/oap_${MGR}/data/mgu-deploy-guard.json`)) || {};
+    check('guard edges: an unmount that fails during a trip is said, the guard recorded, the run stopped (exit 3), nothing rolled back',
+        r.status === 3 && /stays bound/.test(r.out) && /the app manager stopped/.test(g.off || '') && !r.out.includes('rolling back'), r.out);
+
+    // tile_withheld: only flags that hide the tile
+    const t = fakeRoot();
+    t.run(['install', '--artifact', privacyArtifact(), '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
+    const e = readJson(t.entry('fixture_app'));
+    const tile = () => t.status().components.find((c) => c.id === 'fixture_app');
+    write(t.entry('fixture_app'), JSON.stringify(Object.assign({}, e, { provisioningCache: undefined })));
+    const none = tile();
+    write(t.entry('fixture_app'), JSON.stringify(Object.assign({}, e, { provisioningCache: { '-enabled': 'true', '-allowed': 'false' } })));
+    const held = tile();
+    check('guard edges: tile_withheld only when the kept flags hide the tile, not without flags',
+        none.tile_withheld === false && none.tile_visible === false && held.tile_withheld === true, JSON.stringify([none, held]));
+
+    // the boot check whose rollback the guard stops: last-verify written, exit 0
+    const v = fakeRoot({ privacy: false });
+    const marker = `${v.R}.check-fails`;
+    const tool = (version) => {
+        const dir = path.join(fs.mkdtempSync(path.join(T, 'vpriv-')), 'app-privacy');
+        fs.mkdirSync(dir);
+        fs.writeFileSync(path.join(dir, 'component.json'), JSON.stringify({ id: 'app-privacy', kind: 'tool', version,
+            files: [{ path: 'patch_mainapp.js', from: 'patch_mainapp.js', mode: '0755' }, { path: 'check.js', from: 'check.js', mode: '0644' }],
+            units: [], enable: [], recmgr: [], restart: [], check: ['check.js'] }, null, 2));
+        fs.writeFileSync(path.join(dir, 'check.js'), `process.exit(require('fs').existsSync(${JSON.stringify(marker)}) ? 1 : 0);\n`);
+        fs.writeFileSync(path.join(dir, 'patch_mainapp.js'), "'use strict';\nconsole.log(JSON.stringify({ state: 'patched', " +
+            "changed: process.argv[2] === 'apply', restartNeeded: false }));\n");
+        const out = fs.mkdtempSync(path.join(T, 'art-'));
+        if (hu(['artifact', dir, '--out', out]).status !== 0) throw new Error('artifact');
+        return path.join(out, `app-privacy@${version}.tgz`);
+    };
+    v.run(['install', '--artifact', tool('1.0.0'), '--yes']);
+    const v2 = v.run(['install', '--artifact', tool('1.1.0'), '--yes']);
+    if (v2.status !== 0) throw new Error(v2.out);
+    // it stops working: the boot check rolls it back, and app-privacy's apply then bounces
+    fs.writeFileSync(marker, '');
+    write(v.p('var/opt/mgu-deploy/verify.json'), JSON.stringify({ 'app-privacy': { version: '1.1.0', previous: '1.0.0', boot: 'an-earlier-boot' } }));
+    const vr = v.run(['verify'], Object.assign({ MGU_DEPLOY_VERIFY_AFTER_S: '0' }, W));
+    const last = readJsonOrNull(v.p('var/opt/mgu-deploy/last-verify.json'));
+    check('guard edges: a boot check whose rollback the guard stops still ends as succeeded and writes its outcome',
+        vr.status === 0 && /stopped here/.test(vr.out) && last && last.results.some((x) => x.id === 'app-privacy' && x.ok === false),
+        `${vr.out}\n${JSON.stringify(last)}`);
 }
 
 /* The guard in a copy of the iDrive 7 fixture, loaded as MainApp loads it,
@@ -7919,6 +8067,8 @@ const SUITES = [
     testBounceGuard,
     testMainAppGuard,
     testGuardStops,
+    testGuardNested,
+    testGuardEdges,
     testGuardCopy,
     testNoManagerInstall,
     testDefaultCodingInstall,
