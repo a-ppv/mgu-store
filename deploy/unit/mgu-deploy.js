@@ -46,7 +46,7 @@ var cp = require('child_process');
 
 /* deploy/component.json's version; bumped when a file under deploy/unit/
  * changes. */
-var VERSION = '0.7.17';
+var VERSION = '0.7.18';
 var HERE = __dirname;
 var MGR_UID = Number(process.env.MGU_DEPLOY_MAINAPP_UID || 12201);
 
@@ -101,6 +101,7 @@ var CFG = {
     hookTimeoutMs: Number(env('MGU_DEPLOY_HOOK_TIMEOUT_MS', '120000')),
     verifyAfterS: Number(env('MGU_DEPLOY_VERIFY_AFTER_S', '150')),
     bounceMinUpS: Number(env('MGU_DEPLOY_BOUNCE_MIN_UP_S', '60')),
+    guardWatchS: Number(env('MGU_DEPLOY_GUARD_WATCH_S', '60')),
     lockWaitMs: Number(env('MGU_DEPLOY_LOCK_WAIT_MS', '3600000')),
     migrateSettleMs: Number(env('MGU_DEPLOY_MIGRATE_SETTLE_MS', '45000'))
 };
@@ -507,10 +508,17 @@ function bounceWait() {
  * it has not taken in place it takes at the next start. */
 function bounceManager() {
     if (isId8()) { say('MainApp-21 is not restarted; it takes this at the next start of the head unit'); return false; }
+    var off = guardWhy();
+    if (off) {
+        say('the app manager is not restarted until the next start of the head unit (' + off + ')');
+        privacyBounceOwed = false;
+        return false;
+    }
     var old = bounceWait(), waited = 0, cur;
     if (!old) { warn('app manager node child not found; nothing to bounce'); return false; }
     say('bouncing the app manager node child (pid ' + old + ')');
     recordBounce(Math.ceil(nowS()));
+    guardBounce(old);
     privacyBounceOwed = false;
     privacyMayWait = false;
     if (CFG.kill) runOk(CFG.kill, [String(old)]);
@@ -519,10 +527,105 @@ function bounceManager() {
     }
     while (waited <= CFG.bounceTimeoutMs) {
         cur = managerPid();
-        if (cur && cur !== old) { say('app manager respawned (pid ' + cur + ')'); return true; }
-        sleepMs(250); waited += 250;
+        if (cur && cur !== old) { say('app manager respawned (pid ' + cur + ')'); guardWatch(cur); return true; }
+        sleepMs(100); waited += 100;
     }
     throw fail('app manager node child did not respawn; check oapcontroller');
+}
+
+/* ---- the MainApp guard (iDrive 7) ------------------------------------------- */
+/* oapcontroller wipes every app at the third death of the app manager
+ * inside its alive window, and a bounce is the first. So the manager a
+ * bounce starts is watched until it has been up guardWatchS; when it dies
+ * before, the guard is off for the rest of the boot: no bounce and no app
+ * change, and main.js and CertificateManager.js are unbound, so the next
+ * manager starts on the files under them, as they are (app-privacy's apply
+ * after an unbind waits for its run at the next start). The guard file, beside the
+ * in-place status file, holds {boot, bounce, watch, off} (watch.done once
+ * the watch ended); the fallback copy reads it as it loads and runs as the
+ * stock file when a manager the bounce started died within the watch
+ * (fallback_build.js guardSource7), which covers the manager oapcontroller
+ * starts before this tool sees the death. A run cut short while it watched
+ * leaves the watch in the file, for the next run to judge. */
+function guardFile() { return path.join(mgrHome(), 'data', 'mgu-deploy-guard.json'); }
+function readGuard() {
+    var g = readJsonOrNull(guardFile());
+    return g && typeof g === 'object' && g.boot === bootId() ? g : { boot: bootId() };
+}
+/* Written only where MainApp's data folder is: never made by this tool. */
+function writeGuard(g) {
+    if (!fs.existsSync(path.dirname(guardFile()))) return;
+    writeAtomic(guardFile(), JSON.stringify(g) + '\n', 0o644);
+    chownMaybe(guardFile(), MGR_UID, MGR_UID);
+}
+/* Why the guard is off for this boot, or null. A watch left unfinished is
+ * judged here: its manager gone, and none running that started after the
+ * watch would have ended, means it died within it. */
+function guardWhy() {
+    if (isId8()) return null;
+    var g = readGuard(), w = g.watch;
+    if (g.off) return g.off;
+    if (!w || w.done || typeof w.start !== 'number' || !g.bounce) return null;
+    var m = managerStart(), endsMs = w.start + g.bounce.watchMs;
+    if (m && m.pid === w.pid && (m.started === null || Math.abs(m.started * 1000 - w.start) < 2000)) return null;
+    if (m && m.started !== null && m.started * 1000 >= endsMs) return null;
+    return 'the app manager stopped within ' + Math.round(g.bounce.watchMs / 1000) + 's of its restart by mgu-deploy';
+}
+function guardBounce(pid) {
+    if (!(CFG.guardWatchS > 0) || isId8()) return;
+    writeGuard({ boot: bootId(), bounce: { at: Date.now(), pid: pid, watchMs: CFG.guardWatchS * 1000 } });
+}
+/* The manager a bounce started, watched until it has been up guardWatchS. */
+function guardWatch(pid) {
+    if (!(CFG.guardWatchS > 0)) return;
+    var started = processStart(pid), from = monoS(), g = readGuard();
+    g.watch = { pid: pid, start: Math.round((started === null ? nowS() : started) * 1000) };
+    writeGuard(g);
+    say('watching the app manager (pid ' + pid + ') for ' + CFG.guardWatchS + 's');
+    while (monoS() - from < CFG.guardWatchS) {
+        sleepMs(250);
+        if (managerPid() === pid) continue;
+        sleepMs(500);
+        if (managerPid() === pid) continue;
+        var why = 'the app manager stopped ' + Math.round(monoS() - from) + 's after mgu-deploy restarted it';
+        guardTrip(why);
+        throw fail(why + '; no app changes until the next start of the head unit');
+    }
+    g = readGuard();
+    if (g.watch && g.watch.pid === pid) { g.watch.done = true; writeGuard(g); }
+}
+/* The guard off for the rest of the boot: recorded, and main.js and
+ * CertificateManager.js unbound, so the next manager starts on the files
+ * under them. The fallback's unit binds the copy again at the next start. */
+function guardTrip(why) {
+    var g = readGuard();
+    if (!g.off) {
+        g.off = why;
+        writeGuard(g);
+        warn(why + ': no app changes and no restart of the app manager until the next start of the head unit');
+    }
+    while (binds() && bindMounted(mainJs())) {
+        runOk(CFG.umount, [mainJs()]);
+        say(mainJs() + ' unbound: the app manager starts on it until the next start of the head unit');
+    }
+    unbindCertCopy();
+}
+function guardRefuse(what) {
+    var why = guardWhy();
+    if (why) throw refuse(what + ' waits for the next start of the head unit: ' + why);
+}
+/* status, as root: a guard found off with main.js still bound (a run cut
+ * short while it watched) is tripped, under the lock when free. */
+function syncGuard() {
+    var why = guardWhy(), out = process.stdout.write;
+    if (!why || (readGuard().off && !(binds() && (bindMounted(mainJs()) || bindMounted(certManagerJs()))))) return;
+    if (!FAKE && process.getuid() !== 0) return;
+    process.stdout.write = function (s) { return process.stderr.write(s); };
+    try {
+        if (!statusLock()) return;
+        try { guardTrip(why); } finally { releaseLock(); }
+    } catch (e) { process.stderr.write('mgu-deploy: guard: ' + e.message + '\n'); }
+    finally { process.stdout.write = out; }
 }
 /* The manager's node child, waited for up to bounceTimeoutMs: oapcontroller
  * respawns a dead one within seconds. */
@@ -5210,7 +5313,7 @@ function rebuildFallback(keepRunning) {
     }
     rmrf(tmp);
     if (binds()) bindCopy();
-    if (fs.existsSync(privacyTool())) privacyApplyQuiet(null);
+    if (fs.existsSync(privacyTool()) && !guardWhy()) privacyApplyQuiet(null);
     return kept;
 }
 /* Whether the fallback copy's in-place hook is the one in built. */
@@ -5237,6 +5340,8 @@ function bindCopy() {
         warn('no fallback copy at ' + FALLBACK_COPY + ': ' + mainJs() + ' stays the stock file');
         return;
     }
+    var off = guardWhy();
+    if (off) { say(mainJs() + ' is bound to the fallback copy at the next start of the head unit (' + off + ')'); return; }
     runOk(CFG.mount, ['--bind', FALLBACK_COPY, mainJs()]);
 }
 /* Unmounts every bind over main.js that is not the fallback copy as it is
@@ -5255,8 +5360,9 @@ function unbindFallback() {
     if (wasBound) runOk(CFG.umount, [mainJs()]);
     rmrf(FALLBACK_COPY);
     /* The boot unit binds the copy before app-privacy's boot run, so the
-     * stock main.js under it may hold an older patch or none. */
-    if (fs.existsSync(privacyTool())) privacyApplyQuiet(null);
+     * stock main.js under it may hold an older patch or none. With the
+     * guard off it stays as it is until the next start. */
+    if (fs.existsSync(privacyTool()) && !guardWhy()) privacyApplyQuiet(null);
 }
 /* After a restore or a rolled-back change: the copy follows whether the
  * unit is there. */
@@ -5361,7 +5467,7 @@ function managerRunsCopy() {
 /* The copy's in-place hook announced itself for manager m. */
 function hookAnnounced(m) {
     var st = readJsonOrNull(inplaceStatusFile());
-    return !!st && st.pid === m.pid && typeof st.start === 'number' && m.started !== null &&
+    return !!st && st.pid === m.pid && st.state !== 'off' && typeof st.start === 'number' && m.started !== null &&
         Math.abs(st.start / 1000 - m.started) < 5;
 }
 function fallbackOn(state) {
@@ -5723,6 +5829,9 @@ function collectStatus(state) {
         updater_tokens: storedTokens().length,
         appmanager: amStatus(),
         idrive7: { apps: i7Apps(state) },
+        mainapp_guard: guardWhy(),
+        last_bounce_at: lastBounceAt() || null,
+        lost_apps: lostApps(state),
         stock_backup: fs.existsSync(path.join(BACKUPS_DIR, 'stock')) };
 }
 function cmdStatus(args, crashList, live, limits, listing) {
@@ -5775,6 +5884,8 @@ function cmdStatus(args, crashList, live, limits, listing) {
         say("IterioDev's App Manager: " + (s.appmanager.present ? 'service ' + (s.appmanager.version || '?') + ', daemon ' +
             s.appmanager.daemon + (s.appmanager.record ? ', adopted' : '') : 'removed'));
     }
+    if (s.mainapp_guard) say('no app changes until the next start of the head unit: ' + s.mainapp_guard);
+    s.lost_apps.forEach(function (a) { say('not registered any more: ' + a.id + ' ' + a.version + ' (its package is kept)'); });
     s.pending_reboot.forEach(function (p) { say('pending reboot: ' + p.id + ' - ' + p.reason); });
     if (s.last_apply) {
         say('last apply at the start (' + s.last_apply.at + '):');
@@ -6190,10 +6301,11 @@ function installRun(args, afresh) {
             }
         });
         var apps = work.some(function (a) { return a.kind === 'app'; }), migrated = id8;
+        if (apps || Object.keys(elsewhere).length) guardRefuse('an app install');
         if (apps && !id8) preflightFallback();
         /* every app current, the fallback lost: listed again after the
          * tools, with the one bounce app-privacy's waits for */
-        var relist = !apps && !noOap && fallbackLost();
+        var relist = !apps && !noOap && !guardWhy() && fallbackLost();
         privacyMayWait = apps && !id8 && managerListsNoApp() || relist;
         privacyWaitsRelist = relist;
         if (work.length) {
@@ -6394,6 +6506,7 @@ function cmdUninstall(args) {
     var isTool = installedTools().some(function (t) { return t.id === id; });
     if (!isTool && isId8()) return uninstallQueuedId8(id, state);
     if (!isTool && !readJsonOrNull(appEntryFile(id))) throw refuse(id + ': not installed');
+    if (!isTool) guardRefuse('an app removal');
     if (id === 'app-privacy' && ourApps().length) {
         throw refuse('app-privacy stays while our apps are installed (' + ourApps().join(', ') + '); uninstall them first');
     }
@@ -6557,6 +6670,19 @@ function toolPrevious(t) {
 }
 
 /* ---- apps: kept packages and rollback (iDrive 7) ------------------------------- */
+/* Apps this tool installed (state.json apps) that MainApp's registry no
+ * longer has, with the package kept for them: what oapcontroller's wipe
+ * leaves. An uninstall drops both the record and the packages, so an app
+ * removed on purpose is never one. None while another run holds the lock:
+ * it may be removing one. */
+function lostApps(state) {
+    var lock = lockState();
+    if (isId8() || (!lock.free && lock.live)) return [];
+    return Object.keys(state.apps).map(function (id) {
+        var v = state.apps[id] && state.apps[id].version;
+        return !lstatOrNull(appEntryFile(id)) && v && fs.existsSync(keptFile(id, v)) ? { id: id, version: v, package: keptFile(id, v) } : null;
+    }).filter(Boolean);
+}
 /* The manager takes no older package for an installed app, so an app goes
  * back by uninstall and install. The packages for that are kept here, the
  * installed version's and the newest older one: kept/<id>/<id>@<v>.tgz,
@@ -6608,6 +6734,7 @@ function rollbackAppCmd(id) {
     if (isId8()) throw refuse(id + ': apps go back to an earlier version on iDrive 7 only');
     var app = installedApp(id);
     if (!app) throw refuse(id + ': not installed');
+    guardRefuse('an app rollback');
     var prev = keptPrevious(id, app.version), cur = keptFile(id, app.version);
     if (!prev) throw refuse(id + ' ' + app.version + ': no earlier version is kept to roll back to');
     say('rolling back ' + id + ' ' + app.version + ' -> ' + prev.version);
@@ -6776,6 +6903,7 @@ function cmdFallback(args) {
         return 0;
     }
     if (sub === 'migrate' && isId8()) throw refuse('fallback migrate is for iDrive 7');
+    if (sub === 'migrate') guardRefuse('the migration');
     if (sub === 'on') { fallbackOn(state); saveState(state); return 0; }
     if (sub === 'off') { fallbackOff(state, {}); saveState(state); return 0; }
     if (sub === 'migrate') { if (fallbackMigrate(state)) saveState(state); return 0; }
@@ -6845,11 +6973,13 @@ function runCommand() {
             !(args.command === 'appmanager' && !args.positional[0])) {
             acquireLock(); locked = true;
             try { cleanStale(); } catch (e) { warn('could not remove a killed run\'s files: ' + e.message); }
+            var off = guardWhy();
+            if (off) guardTrip(off);
         }
         if (args.command === 'help' || args.command === '--help') { say(HELP); return 0; }
         if (args.command === 'check') return cmdCheck(args);
         if (args.command === 'install') return cmdInstall(args);
-        if (args.command === 'status') return cmdStatus(args, syncBootLists(), syncLiveId8(), syncLimits(), syncListingId8());
+        if (args.command === 'status') { syncGuard(); return cmdStatus(args, syncBootLists(), syncLiveId8(), syncLimits(), syncListingId8()); }
         if (args.command === 'relist') {
             if (!FAKE && typeof process.getuid === 'function' && process.getuid() !== 0) throw refuse('run as root');
             return cmdRelist();

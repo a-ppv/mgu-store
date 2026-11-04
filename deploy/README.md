@@ -475,7 +475,7 @@ first. `restore` needs `--yes`, or `YES` typed at a terminal.
 /var/opt/public/oap/oap_12201/data/apps/<id>.json   an app's registry entry
 /var/opt/public/oap/oap_12201/data/custom_apps.json the apps the fallback lists
 /var/opt/public/oap/oap_12201/data/mgu-deploy-inplace.json the manager's in-place hook and its last answer
-/var/opt/public/oap/oap_12201/data/mgu-deploy-guard.json   iDrive 8: the copy's guard for this boot
+/var/opt/public/oap/oap_12201/data/mgu-deploy-guard.json   the MainApp guard for this boot (iDrive 7: the bounces' watch; iDrive 8: the copy's)
 /var/opt/public/oap/oap_<uid>/           an app's home (source/, data/, security/, someipInterfaces/, ...)
 ```
 
@@ -1028,6 +1028,13 @@ app install keeps its package, and that of the version it replaces (from
 newest older one stay, and an uninstall removes them. `status --json`
 gives an app's `previous` (null on iDrive 8, where it is refused).
 
+`status --json` lists as `lost_apps` the apps this tool installed
+(`state.json` `apps`) that MainApp's registry no longer has while the
+installed version's package is kept, as oapcontroller's wipe leaves them;
+none while another run holds the lock. The updater installs them again
+from that package. An uninstall drops both the app's record and its kept
+packages, so an app removed on purpose is never one.
+
 ### app-privacy
 
 The `app-privacy` tool must be in effect before the manager sees an app
@@ -1094,6 +1101,32 @@ manager again (a respawned child restarts the wait). With no manager
 running there is no bounce and no wait. This is why an install can pause for
 up to 60 s. The rule lives only here: the updater adds no timer of its own
 and gets the spacing by calling this tool.
+
+**The MainApp guard (iDrive 7).** After every bounce the respawned child
+is watched until it has been up 60 s (`MGU_DEPLOY_GUARD_WATCH_S`), so a
+manager that crashes right after a bounce never reaches the third death.
+One that dies before turns the guard off for the rest of the boot:
+
+- the run fails, saying so; no bounce follows, and app installs, removals,
+  rollbacks and `fallback migrate` are refused (exit 2, `… waits for the
+  next start of the head unit: <why>`). Tools still install;
+- `main.js` and `CertificateManager.js` are unbound, and nothing binds
+  them again, so the next manager starts on the files under them as they
+  are (app-privacy's apply after an unbind waits for its run at the next
+  start). The fallback's boot unit binds the copy again at the next start.
+
+The guard file (`oap_12201/data/mgu-deploy-guard.json`, `{boot, bounce,
+watch, off}`) is written before the bounce and when the watch starts. A
+run cut short while it watched leaves its watch there: the next changing
+run, or `status` run as root (under the lock, when free), finds the watched
+manager gone and none started after the watch would have ended, and turns
+the guard off. The fallback copy reads the file as it loads: a load whose
+process started within the watch of the first manager after the bounce, or
+of the one this tool watched, runs as the stock file for the rest of the
+boot (no provisioning fallback, in-place hook or queue order; its hook's
+status file says `off`), which covers the manager oapcontroller starts
+before this tool sees the death. `status --json` gives the reason as
+`mainapp_guard`. oapcontroller is never restarted.
 
 ### Apps
 
@@ -1768,7 +1801,9 @@ stdout, read-only, taking no lock, of this shape:
   "display_bridge_socket": true, "display_bridge_todo_on_car": ["<key>: TODO(on-car): ..."],   (display-bridge)
   "fallback": { ... }, "backups": 3, "stock_backup": true, "updater_tokens": 1,
   "retired_leftovers": ["/usr/lib/oap-mainapp/src/main.js.capbak"],
-  "appmanager": { "present", "version", "app", "daemon", "record" } | null }
+  "appmanager": { "present", "version", "app", "daemon", "record" } | null,
+  "mainapp_guard": "<why app changes wait for the next start>" | null, "last_bounce_at": <epoch s> | null,   (iDrive 7)
+  "lost_apps": [{ "id", "version", "package" }] }
 ```
 
 ## Tests
@@ -1787,7 +1822,11 @@ app-privacy are the stand-ins in `deploy/test/`): reproducible artifacts
 unchanged, tool layout, pruning and idempotence, pending reboots, restarts
 with their health check and the rollback after a crash loop, `rollback`,
 app-privacy as a tool, the fresh-install and update flows through the
-simulated manager, bounce spacing, per-artifact transactions, the stock
+simulated manager, bounce spacing, the MainApp guard (a manager that dies within the watch
+after a bounce: the run fails, no further bounce or app change, main.js
+unbound, until the next start; one that dies after it: nothing; a watch a
+killed run left, judged at the next status; the copy's guard loaded once
+per start), per-artifact transactions, the stock
 restore, `status --json`, the fallback, the in-place install, update and
 uninstall (the copy built from `fixtures/main.js`, its hook run by
 `fake_inplace.js` as the running manager: installs, updates and uninstalls

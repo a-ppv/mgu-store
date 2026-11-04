@@ -340,6 +340,7 @@ function fakeRoot(opts) {
         FAKE_SYNC_LOG: `${R}.sync.log`,
         MGU_DEPLOY_BOUNCE_MIN_UP_S: String(opts.minUp || 0),
         MGU_DEPLOY_BOUNCE_TIMEOUT_MS: '3000',
+        MGU_DEPLOY_GUARD_WATCH_S: '0',
         MGU_DEPLOY_WATCH_POLL_MS: '20',
         MGU_DEPLOY_WATCH_TIMEOUT_MS: '3000',
         FAKE_MGR_PIDFILE: pidFile,
@@ -722,6 +723,133 @@ function testBounceGuard() {
     const r = none.run(['fallback', 'on', '--yes']);
     check('bounce: no manager running: no bounce, no wait', r.status === 0 && r.out.includes('not found') &&
         !r.out.includes('waiting') && Date.now() - n0 < MIN * 1000 && none.kills().length === 0, r.out);
+}
+
+/* After every bounce the respawned manager is watched: one that dies within
+ * the watch turns the guard off for the boot (no bounce, no app change,
+ * main.js unbound), one that dies after it changes nothing, and a run cut
+ * short while it watched leaves what the next run or status judges. */
+function testMainAppGuard() {
+    const W = { MGU_DEPLOY_GUARD_WATCH_S: '2' };
+    const guardOf = (root) => readJsonOrNull(root.p(`var/opt/public/oap/oap_${MGR}/data/mgu-deploy-guard.json`));
+    const onWithApp = () => {
+        const root = bindRoot(false);
+        const r = root.run(['install', '--artifact', privacyArtifact(), '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
+        if (r.status !== 0 || root.binds().length !== 1) throw new Error(`setup failed: ${r.out}`);
+        return root;
+    };
+
+    let root = onWithApp();
+    let kills = root.kills().length;
+    const r = root.run(['fallback', 'on', '--yes'], Object.assign({ FAKE_MGR_CRASH_MS: '400' }, W));
+    const crashes = root.managerLog().filter((l) => l.startsWith('crash '));
+    check('guard: a manager that dies within the watch after the bounce fails the run, saying so',
+        r.status === 1 && crashes.length === 1 && r.out.includes('the app manager stopped') &&
+        r.out.includes('no app changes until the next start of the head unit'), r.out);
+    check('guard: it is off for this boot in the guard file, and main.js is unbound',
+        guardOf(root) && /the app manager stopped/.test(guardOf(root).off) && guardOf(root).boot === 'boot-1' &&
+        root.binds().length === 0, `${JSON.stringify(guardOf(root))}\n${JSON.stringify(root.binds())}`);
+    check('guard: no further bounce, the rollback\'s neither, and the rollback binds nothing',
+        root.kills().length === kills + 1 && root.binds().length === 0, `${JSON.stringify(root.kills())}\n${r.out}`);
+    kills = root.kills().length;
+    const app = root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes']);
+    check('guard: an app install is refused for the rest of the boot, nothing changed',
+        app.status === 2 && app.out.includes('an app install waits for the next start of the head unit') &&
+        !fs.existsSync(root.preinstalled('fixture_app', '1.1.0')) && root.kills().length === kills, app.out);
+    const un = root.run(['uninstall', 'fixture_app', '--yes']);
+    check('guard: so is an app removal', un.status === 2 && un.out.includes('an app removal waits') && fs.existsSync(root.entry('fixture_app')), un.out);
+    const again = root.run(['fallback', 'on', '--yes']);
+    check('guard: a change that would bounce or bind leaves main.js stock and the manager running',
+        root.kills().length === kills && root.binds().length === 0 && again.out.includes('is bound to the fallback copy at the next start'), again.out);
+    const tool = root.run(['install', '--artifact', toolArtifact('0.2.0'), '--yes']);
+    check('guard: tools still install', tool.status === 0, tool.out);
+    let st = root.status();
+    check('guard: status --json says why', st.mainapp_guard === guardOf(root).off, JSON.stringify(st.mainapp_guard));
+    root.reboot(Math.floor(Date.now() / 1000) - 100);
+    root.setManagerStart(Date.now() / 1000 - 90);
+    st = root.status();
+    const next = root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes']);
+    check('guard: the next start of the head unit turns it on again', st.mainapp_guard === null && next.status === 0 &&
+        root.binds().length === 1, `${JSON.stringify(st.mainapp_guard)}\n${next.out}`);
+
+    // a death after the watch changes nothing
+    root = onWithApp();
+    const late = root.run(['fallback', 'on', '--yes'], Object.assign({ FAKE_MGR_CRASH_MS: '3000' }, W));
+    sleep(1500);
+    st = root.status();
+    check('guard: a manager that dies after the watch leaves it on', late.status === 0 &&
+        root.managerLog().some((l) => l.startsWith('crash ')) && st.mainapp_guard === null && guardOf(root).watch.done === true &&
+        root.binds().length === 1, `${late.out}\n${JSON.stringify(guardOf(root))}`);
+
+    // the deploy tool killed while it watched: the next status judges the watch it left
+    root = onWithApp();
+    const outFile = `${root.R}.watch.out`;
+    const fd = fs.openSync(outFile, 'w');
+    const child = cp.spawn(UNIT_NODE, [UNIT_JS, 'fallback', 'on', '--yes'],
+        { env: Object.assign({}, root.env, { MGU_DEPLOY_GUARD_WATCH_S: '30' }), stdio: ['ignore', fd, fd] });
+    fs.closeSync(fd);
+    const out = () => fs.readFileSync(outFile, 'utf8');
+    const t0 = Date.now();
+    while (!out().includes('watching the app manager') && Date.now() - t0 < 20000) sleep(100);
+    const watched = guardOf(root);
+    child.kill('SIGKILL');
+    // its lock names a pid that is gone (this harness reaps the killed child only later)
+    write(root.p('var/opt/mgu-deploy/lock'), '999999 boot-1\n');
+    // the watched manager dies and oapcontroller starts another
+    const pid = root.managerPid();
+    fs.writeFileSync(`${root.R}.mgr.pid`, String(pid + 1));
+    root.setManagerStart(Date.now() / 1000);
+    st = root.status();
+    check('guard: a watch a killed run left, whose manager died within it, turns the guard off at the next status, main.js unbound',
+        watched && watched.watch && watched.watch.pid === pid && /stopped within 30s/.test(st.mainapp_guard) &&
+        /stopped within 30s/.test(guardOf(root).off) && root.binds().length === 0,
+        `${out()}\n${JSON.stringify(watched)}\n${JSON.stringify(st.mainapp_guard)}\n${JSON.stringify(root.binds())}`);
+    const after = root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes']);
+    check('guard: and app installs are refused', after.status === 2 && after.out.includes('waits for the next start'), after.out);
+}
+
+/* The guard in a copy of the iDrive 7 fixture, loaded as MainApp loads it,
+ * one process per start, after a bounce mgu-deploy recorded. */
+function testGuardCopy() {
+    const dir = fs.mkdtempSync(path.join(T, 'guard7-'));
+    const list = path.join(dir, 'custom_apps.json');
+    write(list, JSON.stringify({ our_app: {} }));
+    const r = cp.spawnSync(UNIT_NODE, [path.join(DEPLOY, 'unit', 'fallback_build.js'), path.join(HERE, 'fixtures', 'main.js'),
+        path.join(dir, 'built.js'), list], { encoding: 'utf8' });
+    check('guard copy: builds from the iDrive 7 fixture', r.status === 0, r.stderr);
+    const load = () => JSON.parse(cp.spawnSync(UNIT_NODE, ['-e', `const P=require(${JSON.stringify(path.join(dir, 'built.js'))});` +
+        'console.log(JSON.stringify({pid:process.pid,on:global.__mguDeployGuard.on,why:global.__mguDeployGuard.why,' +
+        'section:new P().handle("our_app",undefined)||null}))'], { encoding: 'utf8' }).stdout);
+    const guard = path.join(dir, 'mgu-deploy-guard.json');
+    const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    let l = load();
+    check('guard copy: with no bounce recorded it is on and lists our app', l.on && l.section && l.section['-enabled'] === 'true' &&
+        !fs.existsSync(guard), JSON.stringify(l));
+    const bounce = { at: Date.now() - 500, pid: 1, watchMs: 60000 };
+    write(guard, JSON.stringify({ boot, bounce }));
+    l = load();
+    const first = readJson(guard).first;
+    check('guard copy: the first load after a bounce claims it and is on', l.on && first && first.pid === l.pid, JSON.stringify(readJson(guard)));
+    l = load();
+    check('guard copy: a load within the watch after it is off for the boot, the fallback with it',
+        !l.on && /^MainApp restarted \d+s after mgu-deploy restarted it$/.test(l.why) && l.section === null && readJson(guard).off === l.why,
+        JSON.stringify(l));
+    const traced = JSON.parse(cp.spawnSync(UNIT_NODE, ['-e', `const P=require(${JSON.stringify(path.join(dir, 'built.js'))});` +
+        'const cm=function(){},stub={_callMethod:cm,install(){}};' +
+        'P.start({appManager:stub},{getById:()=>null},{info(){}}).then(()=>{console.log(JSON.stringify(' +
+        '{callMethod:stub._callMethod===cm,status:JSON.parse(require("fs").readFileSync(' +
+        JSON.stringify(path.join(dir, 'mgu-deploy-inplace.json')) + ',"utf8")).state}));process.exit(0)})'], { encoding: 'utf8' }).stdout || 'null');
+    check('guard copy: off, the in-place hook leaves the installer as it is and says so', traced && traced.callMethod === true &&
+        traced.status === 'off', JSON.stringify(traced));
+    write(guard, JSON.stringify({ boot, bounce, first: { pid: 1, start: Date.now() - 61000 } }));
+    l = load();
+    check('guard copy: a load after the watch ended is on', l.on && !readJson(guard).off, JSON.stringify(l));
+    write(guard, JSON.stringify({ boot, bounce, watch: { pid: 1, start: Date.now() - 2000 } }));
+    l = load();
+    check('guard copy: a load within the watch of the manager mgu-deploy watched is off', !l.on, JSON.stringify(l));
+    write(guard, JSON.stringify({ boot: 'an-earlier-boot', bounce, off: 'x' }));
+    l = load();
+    check('guard copy: a new boot starts it over', l.on, JSON.stringify(l));
 }
 
 /* No app manager running (MainApp's node child gone, oapcontroller not
@@ -7702,6 +7830,8 @@ const SUITES = [
     testPendingReboot,
     testApps,
     testBounceGuard,
+    testMainAppGuard,
+    testGuardCopy,
     testNoManagerInstall,
     testDefaultCodingInstall,
     testMainBind,

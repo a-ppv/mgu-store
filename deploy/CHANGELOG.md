@@ -1,5 +1,12 @@
 # Deploy tool changelog
 
+## 0.7.18
+
+- iDrive 7: after every bounce, the app manager it starts is watched until it has been up 60 s (`MGU_DEPLOY_GUARD_WATCH_S`). One that dies before turns the MainApp guard off for the rest of the boot: the run fails, saying so; no further bounce, and app installs, removals, rollbacks and `fallback migrate` are refused (exit 2) until the next start of the head unit; `main.js` and `CertificateManager.js` are unbound, nothing binds them again and app-privacy's apply does not run after the unbind, so the next app manager starts on the files under them. Tools still install. The fallback's boot unit binds the copy again at the next start. The app manager itself and oapcontroller are never restarted for it.
+- The guard is kept in `oap_12201/data/mgu-deploy-guard.json` (`{boot, bounce, watch, off}`), written before the bounce and when the watch starts. A run cut short while it watched leaves its watch there: the next run, or `status` run as root, finds the watched app manager gone and none started after the watch would have ended, turns the guard off and unbinds the files.
+- The fallback copy reads the same file as it loads. A load whose process started within the watch of the first app manager after the bounce (or of the one the deploy tool watched) runs as the stock file for the rest of the boot (its provisioning fallback, its in-place hook and our apps first in the install queue left out; the hook's status file says `off`). That covers the app manager oapcontroller starts before the deploy tool sees the death.
+- `status --json` has `mainapp_guard` (why app changes wait for the next start, else null), `last_bounce_at` (the last bounce, epoch seconds, else null) and `lost_apps` (`[{id, version, package}]`: apps this tool installed that MainApp's registry no longer has, with their package kept under `kept/<id>/`; none while another run holds the lock). An uninstall drops both the app's record and its kept packages, so an app removed on purpose is never listed.
+
 ## 0.7.17
 
 - `rollback <tool>` runs the deactivate of the version it leaves first, with all of that version in place, as its removal does. One that fails refuses the rollback (exit 2): that version stays current and its activate runs again. A rollback that fails after it (the health check, app-privacy's apply, the activate of the version it goes to) puts the snapshot back and runs the deactivated version's activate again.
