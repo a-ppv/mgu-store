@@ -37,6 +37,8 @@ const ID = catalogLib.ID;
 
 const HERE = __dirname;
 const SELF = 'mgu-updater';
+// the deploy tool's exit status when its MainApp guard stopped the run: what it changed stays
+const GUARD_STOPPED = 3;
 const HANDOVER_EXIT = 75;
 // How long a version on trial keeps trying to reach the catalog. The last
 // attempt, its refresh and the deploy tool's answer take up to about 3 min
@@ -2087,7 +2089,7 @@ class Updater {
         console.log(`${id}: back to ${this.previous[id] || 'its version before'}`);
         return this.deployTool(['rollback', id, '--yes'])
             .then((code) => {
-                if (code !== 0) {
+                if (code !== 0 && code !== GUARD_STOPPED) {
                     const why = this.deployError;
                     throw new Error(code === 2 ? `${why || 'refused by the deploy tool'}; nothing changed` :
                         `going back failed${why ? ': ' + why : ''}`);
@@ -2639,20 +2641,29 @@ class Updater {
                 return this.deploy(verified, moved);
             })
             .then((code) => {
-                if (code !== 0) {
+                const stopped = code === GUARD_STOPPED;
+                if (code !== 0 && !stopped) {
                     const why = this.deployError;
                     const now = this.installedVersion(id, entry.kind);
                     const left = !now ? 'nothing is installed' : now === entry.version && path.basename(before || '') !== entry.version ?
                         `${entry.version} stays current` : 'the previous version was kept';
                     throw new Error(code === 2 ? `${why || 'refused by the deploy tool'}; nothing changed` : `install failed${why ? ': ' + why : ''}; ${left}`);
                 }
-                console.log(`installed ${id}@${entry.version}`);
+                console.log(stopped ? `${id}@${entry.version}: the deploy tool's MainApp guard stopped it; what it did stays until the next start`
+                    : `installed ${id}@${entry.version}`);
                 // installed from a stick's copy of a source: that source is its origin
                 this.origins[id] = { source: this.originOf(item.source), commit: entry.commit || null };
                 this.saveOrigins();
                 if (entry.listedId) {
                     this.aliases[`${this.originOf(item.source)}:${entry.listedId}`] = id;
                     this.saveAliases();
+                }
+                if (stopped) {
+                    // nothing is checked or rolled back: the next start takes it up
+                    if (this.storeTrial && id === this.conf.store_app) {
+                        this.endStoreTrial();
+                    }
+                    return undefined;
                 }
                 return this.bootstrapCheck(entry, toolDir, before, wasOnline);
             })
@@ -2701,7 +2712,7 @@ class Updater {
         console.log(`${id}: uninstall`);
         return this.deployTool(['uninstall', id, '--yes'])
             .then((code) => {
-                if (code !== 0) {
+                if (code !== 0 && code !== GUARD_STOPPED) {
                     const why = this.deployError;
                     throw new Error(code === 2 ? `${why || 'refused by the deploy tool'}; nothing changed` :
                         `uninstall failed${why ? ': ' + why : ''}`);
@@ -2828,7 +2839,8 @@ class Updater {
                 this.lastBounceAt = typeof st.last_bounce_at === 'number' ? st.last_bounce_at : null;
                 const apps = (st.components || []).filter((c) => c && c.kind === 'app' && this.own.indexOf(c.id) >= 0);
                 this.ownApps = apps.map((c) => c.id);
-                this.tilesHidden = apps.filter((c) => c.tile_visible === false).map((c) => c.id);
+                // not one provisioning's own section hides: a restart does not show it
+                this.tilesHidden = apps.filter((c) => c.tile_visible === false && c.tile_withheld !== true).map((c) => c.id);
             }
             this.privacy = privacy;
             this.takeOver();
@@ -2898,10 +2910,11 @@ class Updater {
                 fs.writeFileSync(verified, fs.readFileSync(item.package), { mode: 0o600 });
                 console.log(`${item.id}@${item.version}: install from its kept package`);
                 return this.deploy(verified, false).then((code) => {
-                    if (code !== 0) {
+                    if (code !== 0 && code !== GUARD_STOPPED) {
                         throw new Error(`${this.deployError || 'install failed'}; ${item.id} stays removed until it is installed again`);
                     }
-                    console.log(`installed ${item.id}@${item.version} again`);
+                    console.log(code === GUARD_STOPPED ? `${item.id}@${item.version}: the deploy tool's MainApp guard stopped it; ` +
+                        'what it did stays until the next start' : `installed ${item.id}@${item.version} again`);
                 });
             })
             .catch((err) => {

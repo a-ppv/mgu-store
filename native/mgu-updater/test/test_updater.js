@@ -4157,7 +4157,7 @@ function testSelfRepair() {
     });
     fs.writeFileSync(`${deployLog}.lost`, JSON.stringify([{ id: 'cat_app', version: '1.1.0', package: keptCat },
         { id: 'robertn_store', version: '0.9.0', package: keptStore }]));
-    fs.writeFileSync(`${deployLog}.tiles`, JSON.stringify({ cat_app: false }));
+    fs.writeFileSync(`${deployLog}.tiles`, JSON.stringify({ cat_app: false, gone_app: 'withheld' }));
     const installs = () => fs.readFileSync(deployLog, 'utf8').split('\n').filter((l) => /^install --artifact/.test(l));
     let u = new Updater(conf);
     const comp = (id) => u.state().components.find((c) => c.id === id) || {};
@@ -4167,6 +4167,16 @@ function testSelfRepair() {
         .then(() => u.check())
         .then(() => {
             ok('self-repair: nothing lost, nothing installed', installs().length === 0 && !u.state().mainappGuard, installs().join('\n'));
+            // the deploy tool's MainApp guard stops the run (exit 3)
+            fs.writeFileSync(`${deployLog}.fail`, '3');
+            return ask(conf.socket, { op: 'install', id: 'cat_app' });
+        })
+        .then(() => idle('cat_app stopped by the guard'))
+        .then(() => new Promise((r) => setTimeout(r, 1000)))
+        .then(() => {
+            ok('guard stop: an install the deploy tool\'s guard stopped is no error, and is not tried again',
+                installs().length === 1 && !comp('cat_app').error && !comp('cat_app').queued, JSON.stringify(comp('cat_app')));
+            fs.unlinkSync(`${deployLog}.fail`);
             fs.writeFileSync(`${deployLog}.bounces`, '');
             return ask(conf.socket, { op: 'install', id: 'cat_app' });
         })
@@ -4175,6 +4185,8 @@ function testSelfRepair() {
             ok('tile: an update that restarted the app manager, an app of ours whose tile does not show: the row says so',
                 comp('cat_app').installed === '1.1.0' && comp('cat_app').tileHidden === true && comp('robertn_store').tileHidden === false,
                 JSON.stringify([comp('cat_app'), comp('robertn_store')]));
+            ok('tile: not an app provisioning\'s own section hides (a restart does not show it)', comp('gone_app').tileHidden === false,
+                JSON.stringify(comp('gone_app')));
             fs.unlinkSync(`${deployLog}.bounces`);
             wipe();
             u.watchLost();
@@ -4184,7 +4196,7 @@ function testSelfRepair() {
         .then(() => {
             const i = installs();
             ok('self-repair: after a wipe the Store and our other lost app are installed again from their kept packages, the Store first',
-                i.length === 3 && /verified\/robertn_store@0\.9\.0\.tgz --yes$/.test(i[1]) && /verified\/cat_app@1\.1\.0\.tgz --yes$/.test(i[2]), i.join('\n'));
+                i.length === 4 && /verified\/robertn_store@0\.9\.0\.tgz --yes$/.test(i[2]) && /verified\/cat_app@1\.1\.0\.tgz --yes$/.test(i[3]), i.join('\n'));
             ok('self-repair: an app removed on purpose (no kept package) stays removed', !fs.existsSync(reg('gone_app')));
             wipe();
             u.watchLost();
@@ -4192,7 +4204,7 @@ function testSelfRepair() {
         })
         .then(() => {
             ok('self-repair: once per start: a second wipe in the same start installs nothing',
-                installs().length === 3 && !fs.existsSync(reg('robertn_store')), installs().join('\n'));
+                installs().length === 4 && !fs.existsSync(reg('robertn_store')), installs().join('\n'));
             u.server.close();
             // the next start, with the guard holding app changes back
             fs.writeFileSync(bootFile, 'boot-2\n');
@@ -4203,14 +4215,14 @@ function testSelfRepair() {
         .then(() => new Promise((r) => setTimeout(r, 1000)))
         .then(() => {
             ok('self-repair: not while the deploy tool\'s guard holds app changes back; the state says why',
-                installs().length === 3 && u.state().mainappGuard === 'the app manager stopped 12s after mgu-deploy restarted it', installs().join('\n'));
+                installs().length === 4 && u.state().mainappGuard === 'the app manager stopped 12s after mgu-deploy restarted it', installs().join('\n'));
             fs.unlinkSync(`${deployLog}.guard`);
             return u.refresh();
         })
         .then(() => idle('repaired in the next start'))
         .then(() => {
             ok('self-repair: the next start installs them again',
-                installs().length === 5 && fs.existsSync(reg('robertn_store')) && fs.existsSync(reg('cat_app')), installs().join('\n'));
+                installs().length === 6 && fs.existsSync(reg('robertn_store')) && fs.existsSync(reg('cat_app')), installs().join('\n'));
             ok('tile: the next start clears the tile line, and an install without a restart of the app manager sets none',
                 comp('cat_app').installed === '1.1.0' && comp('cat_app').tileHidden === false, JSON.stringify(comp('cat_app')));
             ['lost', 'tiles'].forEach((x) => fs.unlinkSync(`${deployLog}.${x}`));

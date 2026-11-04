@@ -512,9 +512,18 @@ first change to the sources, writes it.
   `oap_<uid>/source/package.json` its version). Tools from
   `/var/opt/<id>/current/component.json`. Only components a source lists
   are looked at.
-- **Installing.** On request only, one at a time (later requests queue).
-  Nothing else is installed on its own: an app install restarts every running
-  OAP app, which must not happen unasked.
+- **Installing.** On request, one at a time (later requests queue); on
+  its own only to set up again what does not work (`repair`, "The socket")
+  and to put back a lost app (below): an app install restarts every running
+  OAP app, which must not happen unasked. The artifact is downloaded (or
+  packed, or built), copied root-only and checked, then handed to the
+  deploy tool's `install --artifact`, the one install path every app and
+  tool takes on the unit. Exit 0 is done (a tool whose service cannot
+  restart yet reports "takes effect after reboot", shown as *Restart
+  pending*), 1 failed and rolled back, 2 refused by preflight, 3 stopped by
+  the deploy tool's MainApp guard: what it changed stays for the next start
+  of the head unit, nothing is checked, rolled back or tried again, and the
+  state's `mainappGuard` says why.
 - **Lost apps.** An app of ours MainApp's registry no longer has while the
   deploy tool keeps its package (its `status --json` `lost_apps`: what
   oapcontroller's wipe of every app leaves) is installed again from that
@@ -522,13 +531,8 @@ first change to the sources, writes it.
   (`state/boot.json`, by `boot_id`), and not while the deploy tool's
   MainApp guard holds app changes back. Our installed apps are looked at
   every 15 s, so the Store comes back without a computer. An app removed
-  through the Store or the deploy tool's uninstall has no kept package
-  and stays removed. The artifact is downloaded (or
-  packed, or built), copied root-only and checked, then handed to the
-  deploy tool's `install --artifact`, the one install path every app and
-  tool takes on the unit. Exit 0 is done (a tool whose service cannot
-  restart yet reports "takes effect after reboot", shown as *Restart
-  pending*), 1 failed and rolled back, 2 refused by preflight.
+  through the Store, the deploy tool's uninstall or its restore has no
+  kept package and stays removed.
 
 ## Downloads: apps-only internet
 
@@ -876,7 +880,8 @@ each request, and whenever it changes (at most every 250 ms):
   its source (its version there), once for each reason while the updater
   runs; not the updater itself, nor an app on iDrive 8.
   `tileHidden`: an installed app of ours whose tile does not show (the
-  deploy tool's `tile_visible`) after an install that restarted the app
+  deploy tool's `tile_visible`, not one provisioning's own section hides,
+  `tile_withheld`) after an install that restarted the app
   manager (its `last_bounce_at` moved), until the next start of the head
   unit; else false.
   `previous`: the version Undo update returns to (the deploy tool's

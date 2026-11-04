@@ -45,8 +45,9 @@
  * while the app is not registered; $FAKE_DEPLOY_LOG.guard the MainApp
  * guard's reason (mainapp_guard); while $FAKE_DEPLOY_LOG.bounces exists an
  * app install restarts the app manager (last_bounce_at), and
- * $FAKE_DEPLOY_LOG.tiles ({ <app id>: false }) names the apps whose tile
- * does not show (tile_visible).
+ * $FAKE_DEPLOY_LOG.tiles ({ <app id>: false | "withheld" }) names the apps
+ * whose tile does not show (tile_visible), "withheld" by provisioning's own
+ * section (tile_withheld).
  * mgu-uplink stands for the internet: once its current version runs, the
  * lease at $FAKE_LEASE exists ($FAKE_LEASE.good copied) unless that
  * version's component.json says "test_broken": true.
@@ -191,7 +192,7 @@ function apps() {
             const uid = JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8')).userId;
             const p = JSON.parse(fs.readFileSync(path.join(process.env.OAP_ROOT, `oap_${uid}`, 'source', 'package.json'), 'utf8'));
             return { id: p.name, kind: 'app', version: p.version, uid, previous: readPrevious()[p.name] || null,
-                tile_visible: readOr('tiles', {})[p.name] !== false };
+                tile_visible: [false, 'withheld'].indexOf(readOr('tiles', {})[p.name]) < 0, tile_withheld: readOr('tiles', {})[p.name] === 'withheld' };
         } catch (e) {
             return null;
         }
