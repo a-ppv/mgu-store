@@ -2084,6 +2084,7 @@ class Updater {
         const key = item.id;
         const id = item.unit || item.id;
         const from = this.installedVersion(id);
+        const to = this.previous[id] || null;
         this.busy = { id: key, op: 'rollback', phase: 'install' };
         this.changed();
         console.log(`${id}: back to ${this.previous[id] || 'its version before'}`);
@@ -2093,6 +2094,15 @@ class Updater {
                     const why = this.deployError;
                     throw new Error(code === 2 ? `${why || 'refused by the deploy tool'}; nothing changed` :
                         `going back failed${why ? ': ' + why : ''}`);
+                }
+                if (code === GUARD_STOPPED) {
+                    // the deploy tool keeps the version it goes back to for the next start
+                    const back = to || 'the version before';
+                    console.log(`${id}: the deploy tool's MainApp guard stopped going back; ${back} comes back at the next start`);
+                    if (item.why) {
+                        this.errors[key] = `${item.why}; ${back} comes back at the next start`;
+                    }
+                    return;
                 }
                 const now = this.installedVersion(id);
                 console.log(`${id}: ${from} -> ${now}`);

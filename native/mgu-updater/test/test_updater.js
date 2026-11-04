@@ -4225,7 +4225,16 @@ function testSelfRepair() {
                 installs().length === 6 && fs.existsSync(reg('robertn_store')) && fs.existsSync(reg('cat_app')), installs().join('\n'));
             ok('tile: the next start clears the tile line, and an install without a restart of the app manager sets none',
                 comp('cat_app').installed === '1.1.0' && comp('cat_app').tileHidden === false, JSON.stringify(comp('cat_app')));
-            ['lost', 'tiles'].forEach((x) => fs.unlinkSync(`${deployLog}.${x}`));
+            // going back stopped by the guard: the version it goes to comes back at the next start
+            fs.writeFileSync(`${deployLog}.previous`, JSON.stringify({ cat_app: '1.0.0' }));
+            fs.writeFileSync(`${deployLog}.rollbackexit`, '3');
+            return u.refresh().then(() => u.rollback({ id: 'cat_app', why: '1.1.0 did not start' }));
+        })
+        .then(() => {
+            ok('guard stop: going back the guard stopped says which version comes back at the next start',
+                u.errors.cat_app === '1.1.0 did not start; 1.0.0 comes back at the next start' && comp('cat_app').installed === '1.1.0',
+                JSON.stringify(u.errors.cat_app));
+            ['lost', 'tiles', 'previous', 'rollbackexit'].forEach((x) => fs.unlinkSync(`${deployLog}.${x}`));
         });
 }
 

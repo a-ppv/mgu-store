@@ -28,7 +28,8 @@
  * pending_reboot, whose service counts as not restarted; $FAKE_PENDING
  * more, comma-separated, each `id` or `id=reason`; $FAKE_LAST_APPLY is
  * the JSON status --json gives as last_apply;
- * while $FAKE_DEPLOY_LOG.rollbackfail exists, rollback exits 1.
+ * while $FAKE_DEPLOY_LOG.rollbackfail exists, rollback exits 1, and while
+ * $FAKE_DEPLOY_LOG.rollbackexit exists, with the status it holds.
  * $FAKE_DEPLOY_LOG.previous holds { <app id>: <version> }: the app's kept
  * older package, status --json's previous, which its rollback installs (a
  * tool's previous is its other version kept); $FAKE_LAST_VERIFY is the
@@ -108,6 +109,9 @@ function readPrevious() {
 if (cmd === 'rollback') {
     if (fs.existsSync(`${process.env.FAKE_DEPLOY_LOG}.rollbackfail`)) {
         process.exit(1);
+    }
+    if (fs.existsSync(`${process.env.FAKE_DEPLOY_LOG}.rollbackexit`)) {
+        process.exit(Number(fs.readFileSync(`${process.env.FAKE_DEPLOY_LOG}.rollbackexit`, 'utf8')));
     }
     const prev = readPrevious();
     const reg = path.join(process.env.OAP_ROOT, 'oap_12201', 'data', 'apps', `${process.argv[3]}.json`);
