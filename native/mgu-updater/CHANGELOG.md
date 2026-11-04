@@ -1,5 +1,11 @@
 # Updater changelog
 
+## 0.8.26
+
+- An app of ours MainApp's registry no longer has while the deploy tool keeps its package (its `status --json` `lost_apps`, as oapcontroller's wipe leaves them) is installed again from that package, the Store first, once per start of the head unit (`state/boot.json`, by `boot_id`), and not while the deploy tool's MainApp guard holds app changes back. Our installed apps are looked at every 15 s, so a lost one is installed again without waiting for the next check. An app removed through the Store or the deploy tool's uninstall has no kept package and stays removed.
+- After an install that restarted the app manager (the deploy tool's `last_bounce_at` moved), an installed app of ours whose tile does not show (`tile_visible` false) has `tileHidden` true in its row until the next start of the head unit.
+- The state has `mainappGuard`: why app changes wait for the next start of the head unit (the deploy tool's `mainapp_guard`), else null.
+
 ## 0.8.25
 
 - An install that fails with the new version left current (its activate and deactivate both failed) says `<version> stays current`, one that leaves none installed `nothing is installed`, otherwise `the previous version was kept`.
