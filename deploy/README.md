@@ -1645,10 +1645,10 @@ LimitCORE=1
 The two triggering `ConditionPathExists=|` lines (either one lets the unit
 start) keep it off in safe mode unless an install lifts it (below); a
 tool's socket, timer and path units get them alone, in a drop-in of the
-same name. A
-unit that runs in safe mode (`"runsInSafeMode": true`) has none: a service
-gets the limits alone, any other unit no drop-in. Nothing orders a unit on
-safe mode's guard, so no unit, BMW's included, waits for it at boot.
+same name. A unit that runs in safe mode (`"runsInSafeMode": true`) has
+none: a service gets the limits alone, any other unit no drop-in. Nothing
+orders a unit on safe mode's guard, so no unit, BMW's included, waits for
+it at boot.
 
 - `LimitCORE=1`: the kernel pipes core dumps to the crash handler, which
   restarts the head unit for a program its list does not name, and it writes
@@ -1789,12 +1789,14 @@ or update of any app or tool, the same version again included) leaves it.
 `safe-mode` stays on disk while it runs; the install lifts it in RAM, with
 `/run/mgu-deploy/safe-mode-lifted` (the drop-in's other, triggering
 condition), so what it starts runs. `safe-mode` goes once every artifact,
-every tool it lays again and the deploy tool's own update are through. An
-install that fails, partly or wholly, falls short (a tool it lays again
-fails, warned), or that the MainApp guard stops ends the lift and keeps it;
-one cut short leaves the lift until the next run of the deploy tool or the
-next start (a power cut included), as `/run` does not outlive a start. `safe-mode off --yes` removes it too: the Store's Leave
-safe mode, through the updater. Either way the count starts again, the
+every tool it lays again, every app it installs afresh and the deploy
+tool's own update are through. An install that fails, partly or wholly,
+falls short (a tool it lays again fails, warned), or that the MainApp guard
+stops ends the lift and keeps it; one cut short leaves the lift until the
+next run of the deploy tool or the next start (a power cut included), as
+`/run` does not outlive a start. Only the outermost install lifts and
+settles it: an app installed afresh inside it does neither. `safe-mode off
+--yes` removes it too: the Store's Leave safe mode, through the updater. Either way the count starts again, the
 tools start at the next start of the head unit, and until then `status`
 lists `mgu-deploy` under `pending_reboot` (`our tools start at the next
 start`). The boot check (`verify`) waits for a start without safe mode.

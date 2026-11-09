@@ -5284,6 +5284,67 @@ function testSourcePackages() {
     check('source: a bad mgu-app.json is refused, exit 2', nr.status === 2 && nr.out.includes('mgu-app.json: version is not x.y.z'), nr.out);
 }
 
+/* Safe mode through an install that installs an app afresh inside it
+ * (reinstallApp's own install): only the outermost install lifts and
+ * settles it, and a shortfall anywhere in it keeps it. */
+function testSafeModeAfresh() {
+    const file = sourceArtifact('1.2.3');
+    const on = '{"at": "2026-11-09T10:00:00Z", "reason": "test"}\n';
+    const entryFile = (root) => root.p(`var/opt/public/oap/oap_${MGR}/data/apps/robertn_demo.json`);
+    const setup = () => {
+        const root = donorRoot({ recmgr: ['fixture-tool'], active: 'fixture-tool.service' });
+        [file, plainArtifact('0.2.0')].forEach((a) => {
+            const res = root.run(['install', '--artifact', a, '--yes']);
+            if (res.status !== 0) throw new Error(`setup: ${res.out}`);
+        });
+        // the app waits for its update after a firmware update: an install installs it afresh
+        const e = JSON.parse(fs.readFileSync(entryFile(root), 'utf8'));
+        e.NO_FORCED_UPDATE_NEEDED = false;
+        fs.writeFileSync(entryFile(root), JSON.stringify(e));
+        // the tool lacks its unit: the install lays it again from its kept copy
+        fs.unlinkSync(root.p('etc/systemd/system/fixture-tool.service'));
+        write(root.p('var/opt/mgu-deploy/safe-mode'), on);
+        return root;
+    };
+    const on_ = (root) => fs.existsSync(root.p('var/opt/mgu-deploy/safe-mode'));
+    const lifted = (root) => fs.existsSync(root.p('run/mgu-deploy/safe-mode-lifted'));
+
+    let root = setup();
+    let r = root.run(['install', '--artifact', file, '--yes']);
+    check('safe mode afresh: a run that lays a tool again and installs an app afresh, all of it through, leaves it',
+        r.status === 0 && r.out.includes('laid again from the copy kept here') && r.out.includes('robertn_demo 1.2.3 installed afresh') &&
+        !on_(root) && !lifted(root) && root.status().pending_reboot.some((p) => p.id === 'mgu-deploy'), r.out);
+
+    root = setup();
+    fs.writeFileSync(root.unitFile('fixture-tool.service.crash'), `${path.join(root.tool('fixture-tool'), 'current')} versions/0.2.0\n`);
+    r = root.run(['install', '--artifact', file, '--yes']);
+    check('safe mode afresh: a tool laid again that fails (warned) and an app installed afresh that goes through keep it',
+        r.status === 0 && /fixture-tool 0\.2\.0 is not laid again/.test(r.out) && r.out.includes('robertn_demo 1.2.3 installed afresh') &&
+        on_(root) && !lifted(root), r.out);
+
+    root = setup();
+    r = root.run(['install', '--artifact', file, '--yes'], { FAKE_MGR_REJECT: '1' });
+    check('safe mode afresh: a tool laid again that goes through and an app installed afresh that fails keep it',
+        r.status === 1 && r.out.includes('laid again from the copy kept here') && r.out.includes('installing afresh failed: robertn_demo') &&
+        on_(root) && !lifted(root), r.out);
+
+    // two apps installed afresh: the first goes through, the second fails
+    const two = sourceArtifact('1.0.0', { id: 'robertn_two', tree: 'robertn_two@1.0.0' });
+    root = setup();
+    r = root.run(['install', '--artifact', two, '--yes']);
+    const e2 = JSON.parse(fs.readFileSync(root.p(`var/opt/public/oap/oap_${MGR}/data/apps/robertn_two.json`), 'utf8'));
+    e2.NO_FORCED_UPDATE_NEEDED = false;
+    fs.writeFileSync(root.p(`var/opt/public/oap/oap_${MGR}/data/apps/robertn_two.json`), JSON.stringify(e2));
+    // that install went through: safe mode on again, the tool lacking its unit again
+    fs.unlinkSync(root.p('etc/systemd/system/fixture-tool.service'));
+    write(root.p('var/opt/mgu-deploy/safe-mode'), on);
+    r = root.run(['install', '--artifact', file, '--artifact', two, '--yes'], { FAKE_MGR_REJECT: 'robertn_two' });
+    check('safe mode afresh: an app installed afresh that goes through, then one that fails, keep it',
+        r.status === 1 && r.out.includes('laid again from the copy kept here') && r.out.includes('robertn_demo 1.2.3 installed afresh') &&
+        r.out.includes('installing afresh failed: robertn_two') &&
+        on_(root) && !lifted(root), r.out);
+}
+
 /* iDrive 7: a current app the app manager marked for an update at its
  * first start after a firmware update ("NO_FORCED_UPDATE_NEEDED": false,
  * which it starts no app with) is installed afresh, its data carried over. */
@@ -9876,6 +9937,7 @@ const SUITES = [
     testCrashList,
     testServiceLimits,
     testSafeMode,
+    testSafeModeAfresh,
     testBootLists,
     testListSafety,
     testDurableSwitch,
