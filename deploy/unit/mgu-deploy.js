@@ -1170,7 +1170,7 @@ function recmgrWith(text, addNames, removeNames) {
  * StartLimitIntervalSec=0. Units of other components, stock ones included,
  * never get one; a drop-in of this name for a unit no installed tool lists
  * goes, with its folder when nothing else is in it. The same drop-in keeps
- * a tool's units off in safe mode (SAFE_MODE_CONDITION): every service,
+ * a tool's units off in safe mode (SAFE_MODE_CONDITIONS): every service,
  * socket, timer and path unit, except one whose units[] entry says
  * "runsInSafeMode": true (runsInSafeMode). */
 var LIMITS_NAME = 'zz-mgu-deploy-limits.conf';
@@ -1186,13 +1186,13 @@ function limitsText(c, u) {
     if (service && !off) return LIMITS_TEXT;
     if (!service) {
         return off && /\.(socket|timer|path)$/.test(u.name) ? ['# Written by mgu-deploy for every unit a tool installs: ' +
-            'it does not start in safe mode.', '[Unit]', SAFE_MODE_CONDITION, ''].join('\n') : null;
+            'it does not start in safe mode.', '[Unit]'].concat(SAFE_MODE_CONDITIONS, ['']).join('\n') : null;
     }
     return ['# Written by mgu-deploy for every service a tool installs: a crash leaves no core dump for the',
         '# crash handler, which would restart the head unit, a service that keeps failing stops, and',
         '# it does not start in safe mode.',
-        '[Unit]', 'StartLimitIntervalSec=' + LIMITS_INTERVAL_S, 'StartLimitBurst=' + LIMITS_BURST, SAFE_MODE_CONDITION,
-        '', '[Service]', 'LimitCORE=1', ''].join('\n');
+        '[Unit]', 'StartLimitIntervalSec=' + LIMITS_INTERVAL_S, 'StartLimitBurst=' + LIMITS_BURST].concat(SAFE_MODE_CONDITIONS,
+        ['', '[Service]', 'LimitCORE=1', '']).join('\n');
 }
 function unitNames(c) { return (c.units || []).map(function (u) { return u.name; }); }
 /* The units with this tool's drop-in now. */
@@ -1244,12 +1244,14 @@ function limitsPlan(tools, only) {
  * updater), removes it; the tools start at the next start of the head
  * unit. */
 var SAFE_MODE_FILE = path.join(DEPLOY_DIR, 'safe-mode');
-var SAFE_MODE_HELD = path.join(DEPLOY_DIR, 'safe-mode.held');
+/* in RAM: a power cut or restart mid-install leaves safe mode on */
+var SAFE_MODE_LIFTED = path.join(CFG.run, 'safe-mode-lifted');
 var SAFE_MODE_COUNT = path.join(DEPLOY_DIR, 'safe-mode-count');
 var SAFE_MODE_UNIT = 'mgu-deploy-safe-mode.service', SAFE_MODE_NAME = 'mgu-deploy-safe-mode';
 var SAFE_MODE_WANTS = 'multi-user.target.wants';
 var SAFE_MODE_MARK = { unit: 'var-opt-ro.service', name: '40-mgu-deploy-safe-mode.conf', from: 'var-opt-ro-safe-mode.conf' };
-var SAFE_MODE_CONDITION = 'ConditionPathExists=!/var/opt/mgu-deploy/safe-mode';
+/* a unit starts without the flag, or while an install lifts it (triggering conditions: either one) */
+var SAFE_MODE_CONDITIONS = ['ConditionPathExists=|!/var/opt/mgu-deploy/safe-mode', 'ConditionPathExists=|/run/mgu-deploy/safe-mode-lifted'];
 var SAFE_MODE_LEFT = 'our tools start at the next start';
 /* The updater installs the fix and leaves safe mode: its unit runs in safe
  * mode also from a manifest published before "runsInSafeMode". */
@@ -1308,14 +1310,14 @@ function safeModePlan(remove) {
     }
     return { ops: ops, changed: ops.length > 0, paths: paths };
 }
-/* Safe mode held aside by an install (installRun): gone with an install that
- * went through, else back. A run cut short leaves it held: the next run of
- * this tool (cleanStale) or the shutdown (safe_mode.sh mark) puts it back. */
+/* Safe mode lifted for an install (installRun): left with an install that
+ * went through, else on again. A run cut short leaves it lifted until the
+ * next run of this tool (cleanStale) or the next start. */
 function settleSafeMode(ok) {
-    if (!lstatOrNull(SAFE_MODE_HELD)) return;
+    if (!lstatOrNull(SAFE_MODE_LIFTED)) return;
     try {
-        if (!ok) { fs.renameSync(SAFE_MODE_HELD, SAFE_MODE_FILE); return; }
-        rmrf(SAFE_MODE_HELD);
+        rmrf(SAFE_MODE_LIFTED);
+        if (!ok || !lstatOrNull(SAFE_MODE_FILE)) return;
         var state = loadState();
         leaveSafeMode(state);
         saveState(state);
@@ -6994,20 +6996,23 @@ function confirmYes(args, what) {
 /* install --leave: the tools a later install of this caller installs, which
  * no install of this run (an app's afresh among them) lays again */
 var leaveIds = [];
-/* An install, then the current apps it found waiting for an update after a
- * firmware update installed afresh, each with its data folder carried over. */
+/* an artifact or tool to lay again in this run failed without failing the run */
+var installShort = false;
 /* An install that goes through as a whole leaves safe mode; one that
- * fails, stops or is cut short keeps it (settleSafeMode). */
+ * fails, falls short, stops or is cut short keeps it (settleSafeMode). */
 function cmdInstall(args) {
     var ok = false;
+    installShort = false;
     try {
         return onGuardStop(function () { settleSafeMode(false); }, function () {
             var code = installAll(args);
-            ok = code === 0;
+            ok = code === 0 && !installShort;
             return code;
         });
     } finally { settleSafeMode(ok); }
 }
+/* An install, then the current apps it found waiting for an update after a
+ * firmware update installed afresh, each with its data folder carried over. */
 function installAll(args) {
     if (args.leave) leaveIds = args.leave;
     var afresh = [], failed = [];
@@ -7152,10 +7157,10 @@ function installRun(args, afresh) {
         /* past every refusal: the files only of the tools the loop above left so */
         relaid = relaid.filter(function (x) {
             try { relayFiles(x.t, state, x.why); attempted = true; return true; }
-            catch (e) { warn(x.t.id + ' ' + x.t.version + ' is not laid again: ' + e.message); return false; }
+            catch (e) { installShort = true; warn(x.t.id + ' ' + x.t.version + ' is not laid again: ' + e.message); return false; }
         }).map(function (x) { return x.t.id; });
         /* off before the first artifact, so what it starts runs (cmdInstall settles it) */
-        if (work.length && lstatOrNull(SAFE_MODE_FILE)) fs.renameSync(SAFE_MODE_FILE, SAFE_MODE_HELD);
+        if (work.length && lstatOrNull(SAFE_MODE_FILE)) { mkdirp(CFG.run); fs.writeFileSync(SAFE_MODE_LIFTED, process.pid + '\n'); }
         work.forEach(function (a) {
             /* after the tools, app-privacy among them, before the first app */
             if (a.kind === 'app' && !migrated) {
@@ -7210,7 +7215,11 @@ function installRun(args, afresh) {
                     if (tx.saved) rmrf(tx.saved.dir);
                 } catch (e2) { process.stderr.write('rollback failed: ' + e2.message + '\n'); }
                 /* a tool laid again from its copy: the rest goes on */
-                if (a.repair && (args.setup || []).indexOf(a.id) < 0) { warn(a.id + ' ' + a.version + ' is not laid again: ' + e.message); return; }
+                if (a.repair && (args.setup || []).indexOf(a.id) < 0) {
+                    installShort = true;
+                    warn(a.id + ' ' + a.version + ' is not laid again: ' + e.message);
+                    return;
+                }
                 if (done.length) say('installed before this failure, and kept: ' + done.join(', '));
                 if (relaid.length) say('laid again before this failure, files only, and kept: ' + relaid.join(', '));
                 if ((done.length || relaid.length) && e.code === 2) e.code = 1;

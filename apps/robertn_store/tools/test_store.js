@@ -311,7 +311,11 @@ function run() {
     }).then(() => {
         eq(last(/storeStatus\.\d*\.?Text/).split('=')[1], 'Safe mode');
         eq(app._written['storeSafeModeOff.visible'], false, 'Leave safe mode not there as the start screen opens');
-        return new Promise((r) => setTimeout(r, 700));
+        // its timer, fired a little early, shows it all the same
+        const early = app._startFocusTimer._onTimeout;
+        clearTimeout(app._startFocusTimer);
+        early();
+        return tick();
     }).then(() => {
         eq(last(/storeSafeModeOff\.Visible/), 'storeSafeModeOff.Visible=1', 'Leave safe mode shown once the start screen has the focus');
         reset();

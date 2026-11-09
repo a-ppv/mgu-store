@@ -1635,14 +1635,17 @@ drop-in `/etc/systemd/system/<unit>.d/zz-mgu-deploy-limits.conf`:
 [Unit]
 StartLimitIntervalSec=600
 StartLimitBurst=20
-ConditionPathExists=!/var/opt/mgu-deploy/safe-mode
+ConditionPathExists=|!/var/opt/mgu-deploy/safe-mode
+ConditionPathExists=|/run/mgu-deploy/safe-mode-lifted
 
 [Service]
 LimitCORE=1
 ```
 
-`ConditionPathExists=` keeps the unit off in safe mode (below); a tool's
-socket, timer and path units get it alone, in a drop-in of the same name. A
+The two triggering `ConditionPathExists=|` lines (either one lets the unit
+start) keep it off in safe mode unless an install lifts it (below); a
+tool's socket, timer and path units get them alone, in a drop-in of the
+same name. A
 unit that runs in safe mode (`"runsInSafeMode": true`) has none: a service
 gets the limits alone, any other unit no drop-in. Nothing orders a unit on
 safe mode's guard, so no unit, BMW's included, waits for it at boot.
@@ -1699,11 +1702,17 @@ theirs on either record of it:
   (`node`) in a service that keeps running, nor for crashhandler's own
   restarts, which its `restartInfo.xml` records. recmgr's startup, some 10 s
   into a start, deletes its `restartInfo.xml`, also one written in that
-  same start: a restart before then leaves only this record. The mark
-  cannot read the shutdown's kind itself (a restart, a switch-off and a
-  normal restart all run `var-opt-ro.service`), so a restart recmgr asked
-  for that the NodeStateManager did not take, followed within a minute by
-  a switch-off, counts too.
+  same start: a restart before then leaves only this record. A row has no
+  time of its own (`Crash`: `CrashKey`, `Timestamp`, `AppID`, `UserID`,
+  `CrashID`, `LC`; recmgr leaves `Timestamp` empty and `LC` 0), so the time
+  is the database file's: its last write of any kind. The mark cannot read
+  the shutdown's kind itself either (a restart, a switch-off and a normal
+  restart all run `var-opt-ro.service`). So a row added earlier in the
+  start counts when the database was written again within a minute of the
+  shutdown (recmgr writes it for the failures it restarts the head unit
+  for), as does a restart recmgr asked for that the NodeStateManager did not
+  take, followed within a minute by a switch-off. A read that meets
+  recmgr's commit waits up to 200 ms for it.
 
 The shutdown that ends the fourth failed start in a row turns safe mode on,
 so the fifth start is the first without our tools: four failed starts.
@@ -1776,12 +1785,15 @@ tool's own units (the boot check, the fallback, the guard) are not tool
 units and run as before.
 
 **Leaving it.** The next install that goes through as a whole (an install
-or update of any app or tool, the same version again included) leaves it:
-`safe-mode` is set aside as `safe-mode.held` before the first artifact, so
-what the install starts runs, and goes once every artifact and the deploy
-tool's own update are through. An install that fails, partly or wholly, or
-that the MainApp guard stops puts it back; one cut short leaves it held,
-and the next run of the deploy tool or the next shutdown puts it back. `safe-mode off --yes` removes it too: the Store's Leave
+or update of any app or tool, the same version again included) leaves it.
+`safe-mode` stays on disk while it runs; the install lifts it in RAM, with
+`/run/mgu-deploy/safe-mode-lifted` (the drop-in's other, triggering
+condition), so what it starts runs. `safe-mode` goes once every artifact,
+every tool it lays again and the deploy tool's own update are through. An
+install that fails, partly or wholly, falls short (a tool it lays again
+fails, warned), or that the MainApp guard stops ends the lift and keeps it;
+one cut short leaves the lift until the next run of the deploy tool or the
+next start (a power cut included), as `/run` does not outlive a start. `safe-mode off --yes` removes it too: the Store's Leave
 safe mode, through the updater. Either way the count starts again, the
 tools start at the next start of the head unit, and until then `status`
 lists `mgu-deploy` under `pending_reboot` (`our tools start at the next

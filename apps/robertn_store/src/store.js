@@ -208,7 +208,7 @@ class Store extends OnlineApp {
         this._visibleStates = new Set();
         this._hideTimer = null;
         this._webUrlTimer = null;
-        this._startFocusAt = null;      // since when the start screen has the HMI's focus
+        this._startFocused = false;     // the start screen has had the HMI's focus SAFE_MODE_SHOW_MS
         this._startFocusTimer = null;
         this._visible = false;
         this._sawForeground = false;
@@ -873,9 +873,12 @@ class Store extends OnlineApp {
     /* The start screen has the focus since now (focused), or not. */
     _startFocusSince(focused) {
         clearTimeout(this._startFocusTimer);
-        this._startFocusAt = focused ? Date.now() : null;
+        this._startFocused = false;
         if (focused) {
-            this._startFocusTimer = setTimeout(() => this._render(), SAFE_MODE_SHOW_MS);
+            this._startFocusTimer = setTimeout(() => {
+                this._startFocused = true;
+                this._render();
+            }, SAFE_MODE_SHOW_MS);
         }
     }
 
@@ -1540,8 +1543,7 @@ class Store extends OnlineApp {
         this._set(C.status, 'Text', connected ? statusLine(st, true) : statusLine(null, false, !!readSecret()), 'Text');
         this._set(C.check, 'Text', connected && st.catalog.checking ? tr("Checking") : tr("Check for updates"), 'Text');
         // shown above the focus the HMI gave the start screen, so a press there never leaves safe mode
-        this._show(C.safeModeOff, connected && !!st.safeMode && !st.busy && this._startFocusAt !== null &&
-            Date.now() - this._startFocusAt >= SAFE_MODE_SHOW_MS);
+        this._show(C.safeModeOff, connected && !!st.safeMode && !st.busy && this._startFocused);
 
         const busy = connected ? st.busy : null;
         const busyRow = busy && st.components.find((c) => c.id === busy.id);

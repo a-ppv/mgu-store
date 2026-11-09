@@ -2318,7 +2318,8 @@ function testSources(certs) {
         '}'
     ].join('\n');
     const tTool = { id: 't_tool', kind: 'tool', version: '1.0.0', title: 'Tree tool',
-        files: [{ path: 't.sh', from: 'bin/t.sh', mode: '0755' }], units: [{ name: 't.service', from: 'systemd/t.service' }], internet: true };
+        files: [{ path: 't.sh', from: 'bin/t.sh', mode: '0755' }], units: [{ name: 't.service', from: 'systemd/t.service' },
+            { name: 't-boot.service', from: 'systemd/t.service', runsInSafeMode: true }], internet: true };
     const branchFiles = (pVersion, more) => Object.assign({
         'mgu-repo.json': JSON.stringify({ schema: 1, components: [
             { id: 'p_app', kind: 'app', path: 'apps/p_app', build: 'unit', uninstallable: true },
@@ -2761,6 +2762,8 @@ function testSources(certs) {
             ok('repo: a tool is packed as a tool kit, each file with its sha256, the rest of component.json kept',
                 c.files[0].path === 't.sh' && c.files[0].sha256 === sha256(Buffer.from('#!/bin/sh\necho t\n')) && !c.files[0].from &&
                 c.units[0].name === 't.service' && c.internet === true && fs.readFileSync(path.join(dir, 't.sh'), 'utf8') === '#!/bin/sh\necho t\n');
+            ok('repo: a unit\'s runsInSafeMode reaches the kit, on that unit only (the deploy tool\'s safe mode)',
+                JSON.stringify(c.units) === JSON.stringify([{ name: 't.service' }, { name: 't-boot.service', runsInSafeMode: true }]), JSON.stringify(c.units));
             ok('github: the tarball came from codeload without the token', seen.some((x) => /^codeload/.test(x.host) && x.auth === null) && authLeaks().length === 0);
             // the branch moves on, same versions, a change outside both components
             const c2 = ghCommit('third/branchy', branchFiles('1.0.0', { 'README.md': 'more\n', 'apps/b_ok/notes.txt': 'b\n' }));
