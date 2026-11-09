@@ -6996,20 +6996,29 @@ function confirmYes(args, what) {
 /* install --leave: the tools a later install of this caller installs, which
  * no install of this run (an app's afresh among them) lays again */
 var leaveIds = [];
-/* an artifact or tool to lay again in this run failed without failing the run */
-var installShort = false;
+/* The outermost install of this run: { short: an artifact or tool it lays
+ * again failed without failing it, depth: installs inside it (an app
+ * installed afresh) }, null outside one. */
+var outerInstall = null;
 /* An install that goes through as a whole leaves safe mode; one that
- * fails, falls short, stops or is cut short keeps it (settleSafeMode). */
+ * fails, falls short, stops or is cut short keeps it (settleSafeMode). Only
+ * the outermost one lifts and settles it. */
 function cmdInstall(args) {
-    var ok = false;
-    installShort = false;
+    if (outerInstall) {
+        outerInstall.depth += 1;
+        try { return installAll(args); } finally { outerInstall.depth -= 1; }
+    }
+    var run = outerInstall = { short: false, depth: 0 }, ok = false;
     try {
         return onGuardStop(function () { settleSafeMode(false); }, function () {
             var code = installAll(args);
-            ok = code === 0 && !installShort;
+            ok = code === 0 && !run.short;
             return code;
         });
-    } finally { settleSafeMode(ok); }
+    } finally {
+        outerInstall = null;
+        settleSafeMode(ok);
+    }
 }
 /* An install, then the current apps it found waiting for an update after a
  * firmware update installed afresh, each with its data folder carried over. */
@@ -7157,10 +7166,13 @@ function installRun(args, afresh) {
         /* past every refusal: the files only of the tools the loop above left so */
         relaid = relaid.filter(function (x) {
             try { relayFiles(x.t, state, x.why); attempted = true; return true; }
-            catch (e) { installShort = true; warn(x.t.id + ' ' + x.t.version + ' is not laid again: ' + e.message); return false; }
+            catch (e) { outerInstall.short = true; warn(x.t.id + ' ' + x.t.version + ' is not laid again: ' + e.message); return false; }
         }).map(function (x) { return x.t.id; });
-        /* off before the first artifact, so what it starts runs (cmdInstall settles it) */
-        if (work.length && lstatOrNull(SAFE_MODE_FILE)) { mkdirp(CFG.run); fs.writeFileSync(SAFE_MODE_LIFTED, process.pid + '\n'); }
+        /* lifted before the first artifact, so what it starts runs (cmdInstall settles it) */
+        if (work.length && outerInstall.depth === 0 && lstatOrNull(SAFE_MODE_FILE)) {
+            mkdirp(CFG.run);
+            fs.writeFileSync(SAFE_MODE_LIFTED, process.pid + '\n');
+        }
         work.forEach(function (a) {
             /* after the tools, app-privacy among them, before the first app */
             if (a.kind === 'app' && !migrated) {
@@ -7216,7 +7228,7 @@ function installRun(args, afresh) {
                 } catch (e2) { process.stderr.write('rollback failed: ' + e2.message + '\n'); }
                 /* a tool laid again from its copy: the rest goes on */
                 if (a.repair && (args.setup || []).indexOf(a.id) < 0) {
-                    installShort = true;
+                    outerInstall.short = true;
                     warn(a.id + ' ' + a.version + ' is not laid again: ' + e.message);
                     return;
                 }
