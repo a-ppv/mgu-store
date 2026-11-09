@@ -20,9 +20,10 @@
 # The restart is theirs on either record of it: the restartInfo.xml each
 # writes when it asks (written in this start), or a row recmgr added to its
 # crash statistics (recmgr_stats.db, table Crash, whose keys only grow; a
-# row only for a failure it restarts the head unit for) since this start's
-# boot step; recmgr's startup, some 10 s into a start, deletes its
-# restartInfo.xml, also one of that same start. A shutdown without either
+# row only for a failure it restarts the head unit for, written just before
+# it asks) since this start's boot step, the statistics written within
+# STATS_RESTART_S of the shutdown; recmgr's startup, some 10 s into a
+# start, deletes its restartInfo.xml, also one of that same start. A shutdown without either
 # record (a switch-off, the HMI's or the Store's restart) clears the count
 # once the start was up FAILED_UP_S; earlier, it could be a restart whose
 # records were lost, and neither counts nor clears. A start up RESET_UP_S
@@ -52,6 +53,8 @@ FAILED_UP_S=120
 RESET_UP_S=300
 # the longest a read of recmgr's statistics may take
 STATS_WAIT_S=2
+# recmgr's restart follows its statistics' write within this
+STATS_RESTART_S=60
 
 LAST=$DIR/last-shutdown
 COUNT=$DIR/safe-mode-count
@@ -129,7 +132,11 @@ mark)
   set -- $(first_line "$CRASHES")
   if [ "$1" = "$boot" ] && is_number "$2"; then
     k=$(crash_key)
-    [ -n "$k" ] && [ "$k" -gt "$2" ] && who="$who recmgr_stats"
+    # recmgr writes the row, then asks for the restart: the shutdown is that restart
+    # when the statistics were written within STATS_RESTART_S of it
+    t=$(stat -c %Y "$STATS" 2>/dev/null || stat -f %m "$STATS" 2>/dev/null)
+    case "$t" in ''|*[!0-9]*) t=0 ;; esac
+    [ -n "$k" ] && [ "$k" -gt "$2" ] && [ "$t" -ge $((now - STATS_RESTART_S)) ] && who="$who recmgr_stats"
   fi
   if [ -n "$who" ]; then kind=crash; else kind=normal; fi
   put "$LAST" "$boot $kind $up$who"
