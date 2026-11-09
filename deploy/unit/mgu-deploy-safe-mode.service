@@ -1,13 +1,12 @@
 [Unit]
 Description=mgu-deploy safe mode: our tools' units stay off after repeated failed starts of the head unit
-# Early, before our tools' units (their drop-in zz-mgu-deploy-limits.conf
-# orders them after this one); BMW's units do not wait for it.
+# Early at each start, after /var/opt is mounted; no unit is ordered after it.
 DefaultDependencies=no
 RequiresMountsFor=/var/opt
 
 [Service]
 Type=simple
-# Counts how the last start ended and turns safe mode on (safe_mode.sh).
+# recmgr's crash statistics as they stand at the start, for the shutdown's count (safe_mode.sh).
 ExecStartPre=-/bin/sh /var/opt/mgu-deploy/current/safe_mode.sh boot
 # A start that stays up 5 minutes clears the count. The service stays up
 # after, so recmgr never sees it end.
