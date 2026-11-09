@@ -1692,11 +1692,18 @@ theirs on either record of it:
   after now, a second of slack each way);
 - a row recmgr added to its crash statistics since the start's boot step
   (`/var/opt/public/sin/recmgr/recmgr_stats.db`, table `Crash`, whose
-  `CrashKey` only grows; read with the firmware's `sqlite3`, for at most 2 s).
-  recmgr adds one for each failure it restarts the head unit for, none for a
-  service in its lists. recmgr's startup, some 10 s into a start, deletes its
-  `restartInfo.xml`, also one written in that same start: a restart before
-  then leaves only this record.
+  `CrashKey` only grows), with the statistics written within 60 s of the
+  shutdown. recmgr adds the row for a failure it restarts the head unit for,
+  just before it asks for the restart, in the same start; none for a
+  service in its lists, nor for a crash of a program crashhandler lists
+  (`node`) in a service that keeps running, nor for crashhandler's own
+  restarts, which its `restartInfo.xml` records. recmgr's startup, some 10 s
+  into a start, deletes its `restartInfo.xml`, also one written in that
+  same start: a restart before then leaves only this record. The mark
+  cannot read the shutdown's kind itself (a restart, a switch-off and a
+  normal restart all run `var-opt-ro.service`), so a restart recmgr asked
+  for that the NodeStateManager did not take, followed within a minute by
+  a switch-off, counts too.
 
 The shutdown that ends the fourth failed start in a row turns safe mode on,
 so the fifth start is the first without our tools: four failed starts.

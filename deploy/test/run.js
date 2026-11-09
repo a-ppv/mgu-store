@@ -5674,9 +5674,17 @@ function testSafeMode() {
     next();
     // recmgr's startup deletes its restartInfo.xml, also one of the same start: its crash statistics still tell
     crashKey(9);
+    fs.utimesSync(gp('var/opt/public/sin/recmgr/recmgr_stats.db'), now(), now());
     endAt(12);
     check('safe mode: a row recmgr added to its crash statistics in this start marks a crash restart, and counts',
         fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8') === `${bootNow()} crash 12 recmgr_stats\n` && count() === '2');
+    next();
+    crashKey(10);
+    fs.utimesSync(gp('var/opt/public/sin/recmgr/recmgr_stats.db'), now() - 120, now() - 120);
+    endAt(60);
+    check('safe mode: a row whose statistics were written over a minute before the shutdown is no record of it', count() === '2' &&
+        /normal 60$/.test(fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8').trim()));
+    fs.utimesSync(gp('var/opt/public/sin/recmgr/recmgr_stats.db'), now(), now());
     next();
     endAt(60);
     check('safe mode: statistics that did not grow in the start: no crash', count() === '2' &&
@@ -5684,6 +5692,7 @@ function testSafeMode() {
     crashKey(null);
     next();
     crashKey(12);
+    fs.utimesSync(gp('var/opt/public/sin/recmgr/recmgr_stats.db'), now(), now());
     endAt(60);
     check('safe mode: no statistics at the boot step: no baseline, nothing taken from them', count() === '2' &&
         /normal 60$/.test(fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8').trim()));
