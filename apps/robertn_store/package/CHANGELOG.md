@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-No changes.
+In the deploy tool's safe mode the status line says Safe mode, and Leave
+safe mode on the start screen leaves it.
 
 ## 0.9.33
 

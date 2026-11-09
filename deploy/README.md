@@ -1635,10 +1635,19 @@ drop-in `/etc/systemd/system/<unit>.d/zz-mgu-deploy-limits.conf`:
 [Unit]
 StartLimitIntervalSec=600
 StartLimitBurst=20
+Wants=mgu-deploy-safe-mode.service
+After=mgu-deploy-safe-mode.service
+ConditionPathExists=!/var/opt/mgu-deploy/safe-mode
 
 [Service]
 LimitCORE=1
 ```
+
+The `Wants=`, `After=` and `ConditionPathExists=` lines keep the unit off in
+safe mode (below); a tool's socket, timer and path units get them alone, in a
+drop-in of the same name. A unit that runs in safe mode
+(`"runsInSafeMode": true`) has none of them: a service gets the limits
+alone, any other unit no drop-in.
 
 - `LimitCORE=1`: the kernel pipes core dumps to the crash handler, which
   restarts the head unit for a program its list does not name, and it writes
@@ -1665,6 +1674,107 @@ A change is followed by `daemon-reload`; a running service takes the limits at
 its next start (the unit has no `prlimit` to change a running process).
 `status --json` reports the step as `service_limits: {state, reason}`. Units of other components and the car's
 own are never given one.
+
+### Safe mode
+
+When the head unit keeps restarting soon after it starts, and nothing more
+specific (such as a tool's own boot recovery) has ended it, our tools'
+units stay off: **safe mode**. While `/var/opt/mgu-deploy/safe-mode` exists,
+no unit of an installed tool starts, except those that run in safe mode;
+BMW's units are never touched.
+
+**What counts.** A start counts as failed when it ended in a restart recmgr
+or crashhandler asked for within 2 minutes of the start (the system uptime
+at the shutdown), and none of our tools asked for the restart. A restart is
+theirs on either record of it:
+
+- the `restartInfo.xml` each writes under
+  `/var/opt/public/sin/<recmgr|crashhandler>/` when it asks, written in this
+  start (its modification time not before `/proc/stat`'s `btime` and not
+  after now, a second of slack each way);
+- a row recmgr added to its crash statistics since the start's boot step
+  (`/var/opt/public/sin/recmgr/recmgr_stats.db`, table `Crash`, whose
+  `CrashKey` only grows; read with the firmware's `sqlite3`, for at most 2 s).
+  recmgr adds one for each failure it restarts the head unit for, none for a
+  service in its lists. recmgr's startup, some 10 s into a start, deletes its
+  `restartInfo.xml`, also one written in that same start: a restart before
+  then leaves only this record.
+
+Four failed starts in a row turn safe mode on. Nothing else counts:
+
+| How a start ended | The count |
+|---|---|
+| a restart recmgr or crashhandler asked for, up less than 2 minutes | + 1 |
+| a shutdown without either record after 2 minutes: a switch-off, the HMI's, the Store's or another normal restart | back to 0 |
+| a restart our tools asked for (`restart-requested` names the start) | back to 0 |
+| the start stayed up 5 minutes | back to 0 |
+| a shutdown without either record within 2 minutes (a short drive, or a restart whose records were lost) | kept |
+| a crash restart between 2 and 5 minutes | kept |
+| no shutdown mark: a power cut, a reset that skipped `var-opt-ro.service`, `systemctl reboot` | kept |
+
+A suspend keeps the start (and its boot id) and its uptime runs on, so a
+drive after it never counts as an early end. A state file that is missing
+or does not read as `safe_mode.sh` writes it counts nothing, so it can
+never turn safe mode on.
+
+**How.** `safe_mode.sh` (beside `mgu-deploy.js`) does the counting, in sh, in
+three places:
+
+- `mark`, at each shutdown through the NodeStateManager: the drop-in
+  `/etc/systemd/system/var-opt-ro.service.d/40-mgu-deploy-safe-mode.conf`
+  runs it before `/var/opt` goes read-only (`ExecStartPre=-`, so it never
+  holds up the remount). recmgr's and crashhandler's restarts, a switch-off
+  and a normal restart all take that path. It writes `last-shutdown`:
+  `<boot id> crash|normal <uptime s> [recmgr] [crashhandler] [recmgr_stats]`.
+- `boot`, at the next start: `mgu-deploy-safe-mode.service`
+  (`DefaultDependencies=no`, after `/var/opt` is mounted, enabled for
+  `multi-user.target` and in recmgr's list). Every tool unit's drop-in
+  orders it after this one. It counts the start before from
+  `last-shutdown` and `restart-requested`, writes `safe-mode-count` (`<failed
+  starts in a row> <boot id it counted in>`) and `safe-mode-crashes` (`<boot
+  id> <recmgr's last crash key>`), and at the fourth failed start in a row
+  writes `safe-mode`, `{"at": "<UTC time>", "reason": "<why>"}`, and starts
+  the count again.
+- `up`, the same service: at 5 minutes of uptime the count goes back to 0.
+  The service then stays up, so recmgr never sees it end.
+
+Each file is written whole (renamed into place) under `/var/opt/mgu-deploy`.
+On a head unit whose firmware has `var-opt-ro.service`, an install lays the
+service, its link, the drop-in and the recmgr entry (entry first), as does
+`status` (with the limits drop-ins, under the same rules); `remove-all` takes
+them out.
+
+**A restart our tools ask for** is marked first: its start's boot id
+(`/proc/sys/kernel/random/boot_id`) in `/var/opt/mgu-deploy/restart-requested`,
+written whole before the request. The updater's `reboot`, `mgu-install.js`'s
+restart and mgu-render's car test do it; another tool that asks for a
+head-unit restart writes it the same way.
+
+**What runs in safe mode.** A unit whose entry in the tool's `component.json`
+says so:
+
+```json
+"units": [{ "name": "acme-recovery.service", "from": "systemd/acme-recovery.service", "runsInSafeMode": true }]
+```
+
+Give it to units that recover the head unit or leave safe mode: the updater
+(which installs the fix and leaves safe mode; the deploy tool also treats a
+published updater's unit without the flag so), and units that put BMW's
+files back. `deploy/hu artifact` carries the flag into the kit. The deploy
+tool's own units (the boot check, the fallback, the guard) are not tool
+units and run as before.
+
+**Leaving it.** The next install that goes through (an install or update of
+any app or tool, the same version again included) removes `safe-mode`
+before its first artifact, so what it starts runs, and puts it back when
+none goes through. `safe-mode off --yes` removes it too: the Store's Leave
+safe mode, through the updater. Either way the count starts again, the
+tools start at the next start of the head unit, and until then `status`
+lists `mgu-deploy` under `pending_reboot` (`our tools start at the next
+start`). The boot check (`verify`) waits for a start without safe mode.
+`status --json` reports `safe_mode: {at, reason}` while it is on (both null
+for a file that does not read as written), else `null`; `safe-mode
+[--json]` says the same.
 
 ### One transaction per artifact
 
@@ -1987,7 +2097,8 @@ stdout, read-only, taking no lock, of this shape:
   "retired_leftovers": ["/usr/lib/oap-mainapp/src/main.js.capbak"],
   "appmanager": { "present", "version", "app", "daemon", "record" } | null,
   "mainapp_guard": "<why app changes wait for the next start>" | null, "last_bounce_at": <epoch s> | null,   (iDrive 7)
-  "lost_apps": [{ "id", "version", "package" }] }
+  "lost_apps": [{ "id", "version", "package" }],
+  "safe_mode": { "at", "reason" } | null }
 ```
 
 ## Tests

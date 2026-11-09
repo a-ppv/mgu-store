@@ -150,6 +150,8 @@ var SELF_FILES = [{ path: 'mgu-deploy.js', mode: '0644' }, { path: 'mgu-deploy.s
     { path: 'mgu-deploy-apply.service', mode: '0644' }, { path: 'mgu-deploy-verify.service', mode: '0644' },
     { path: 'mgu-deploy-cleanup.service', mode: '0644' },
     { path: 'mgu-app-fallback-id8.service', mode: '0644' },
+    { path: 'safe_mode.sh', mode: '0755' }, { path: 'mgu-deploy-safe-mode.service', mode: '0644' },
+    { path: 'var-opt-ro-safe-mode.conf', mode: '0644' },
     { path: 'oap_link.js', mode: '0644' }, { path: 'oap_pack.js', mode: '0644' }];
 /* A file of this tool: beside the script, or in the repository's tools/
  * (the linker and packer, when it runs from deploy/unit/). */
@@ -1167,7 +1169,10 @@ function recmgrWith(text, addNames, removeNames) {
  * install of the tool or its interval has passed, overriding a unit's own
  * StartLimitIntervalSec=0. Units of other components, stock ones included,
  * never get one; a drop-in of this name for a unit no installed tool lists
- * goes, with its folder when nothing else is in it. */
+ * goes, with its folder when nothing else is in it. The same drop-in keeps
+ * a tool's units off in safe mode (SAFE_MODE_LINES): every service, socket,
+ * timer and path unit, except one whose units[] entry says
+ * "runsInSafeMode": true (runsInSafeMode). */
 var LIMITS_NAME = 'zz-mgu-deploy-limits.conf';
 var LIMITS_INTERVAL_S = 600, LIMITS_BURST = 20;
 var LIMITS_TEXT = ['# Written by mgu-deploy for every service a tool installs: a crash leaves no core dump for the',
@@ -1175,8 +1180,25 @@ var LIMITS_TEXT = ['# Written by mgu-deploy for every service a tool installs: a
     '[Unit]', 'StartLimitIntervalSec=' + LIMITS_INTERVAL_S, 'StartLimitBurst=' + LIMITS_BURST, '',
     '[Service]', 'LimitCORE=1', ''].join('\n');
 function limitsPath(unit) { return path.join(CFG.systemd, unit + '.d', LIMITS_NAME); }
+/* The units with the drop-in: services, and the sockets, timers and paths
+ * that do not run in safe mode. */
 function limitedUnits(c) {
-    return (c.units || []).map(function (u) { return u.name; }).filter(function (n) { return /\.service$/.test(n); });
+    return (c.units || []).filter(function (u) {
+        return /\.service$/.test(u.name) || /\.(socket|timer|path)$/.test(u.name) && !runsInSafeMode(c, u);
+    }).map(function (u) { return u.name; });
+}
+/* The drop-in for unit u of tool c. */
+function limitsText(c, u) {
+    if (runsInSafeMode(c, u)) return LIMITS_TEXT;
+    if (!/\.service$/.test(u.name)) {
+        return ['# Written by mgu-deploy for every unit a tool installs: it does not start in safe mode.',
+            '[Unit]'].concat(SAFE_MODE_LINES, ['']).join('\n');
+    }
+    return ['# Written by mgu-deploy for every service a tool installs: a crash leaves no core dump for the',
+        '# crash handler, which would restart the head unit, a service that keeps failing stops, and',
+        '# it does not start in safe mode.',
+        '[Unit]', 'StartLimitIntervalSec=' + LIMITS_INTERVAL_S, 'StartLimitBurst=' + LIMITS_BURST].concat(SAFE_MODE_LINES,
+        ['', '[Service]', 'LimitCORE=1', '']).join('\n');
 }
 /* The units with this tool's drop-in now. */
 function limitsPresent() {
@@ -1193,16 +1215,21 @@ function limitsPresent() {
  * it from every other unit, among only (all units when null); changed: the
  * units whose drop-in is written or removed. */
 function limitsPlan(tools, only) {
-    var want = [], ops = [], changed = [];
+    var want = [], text = {}, ops = [], changed = [];
     tools.forEach(function (t) {
-        limitedUnits(t.component).forEach(function (u) { if (want.indexOf(u) < 0) want.push(u); });
+        (t.component.units || []).forEach(function (u) {
+            if (limitedUnits({ id: t.component.id, units: [u] }).length && want.indexOf(u.name) < 0) {
+                want.push(u.name);
+                text[u.name] = limitsText(t.component, u);
+            }
+        });
     });
     var scope = only || want.concat(limitsPresent().filter(function (u) { return want.indexOf(u) < 0; }));
     scope.forEach(function (unit) {
         var p = limitsPath(unit), dir = path.dirname(p);
         if (want.indexOf(unit) >= 0) {
-            if (bytesEqualFile(Buffer.from(LIMITS_TEXT), p)) return;
-            ops.push({ type: 'copy', data: LIMITS_TEXT, path: p, mode: 0o644 });
+            if (bytesEqualFile(Buffer.from(text[unit]), p)) return;
+            ops.push({ type: 'copy', data: text[unit], path: p, mode: 0o644 });
             changed.push(unit);
         } else if (lstatOrNull(p)) {
             ops.push({ type: 'delete', path: p });
@@ -1211,6 +1238,112 @@ function limitsPlan(tools, only) {
         }
     });
     return { ops: ops, changed: changed, paths: scope.map(limitsPath) };
+}
+
+/* ---- safe mode ------------------------------------------------------------- */
+/* After repeated failed starts of the head unit, our tools' units stay off
+ * (deploy/README.md, "Safe mode"): safe_mode.sh counts the starts, run by
+ * mgu-deploy-safe-mode.service early at boot and by a drop-in of
+ * var-opt-ro.service at each shutdown, and writes SAFE_MODE_FILE; the
+ * limits drop-in keeps a unit off while it exists. The next install that
+ * goes through, or `safe-mode off` (the Store's button, through the
+ * updater), removes it; the tools start at the next start of the head
+ * unit. */
+var SAFE_MODE_FILE = path.join(DEPLOY_DIR, 'safe-mode');
+var SAFE_MODE_COUNT = path.join(DEPLOY_DIR, 'safe-mode-count');
+var SAFE_MODE_UNIT = 'mgu-deploy-safe-mode.service', SAFE_MODE_NAME = 'mgu-deploy-safe-mode';
+var SAFE_MODE_WANTS = 'multi-user.target.wants';
+var SAFE_MODE_MARK = { unit: 'var-opt-ro.service', name: '40-mgu-deploy-safe-mode.conf', from: 'var-opt-ro-safe-mode.conf' };
+var SAFE_MODE_LINES = ['Wants=' + SAFE_MODE_UNIT, 'After=' + SAFE_MODE_UNIT,
+    'ConditionPathExists=!/var/opt/mgu-deploy/safe-mode'];
+var SAFE_MODE_LEFT = 'our tools start at the next start';
+/* Units that run in safe mode though the installed tool's manifest may not
+ * say so (published before "runsInSafeMode"): the updater, which installs
+ * the fix and leaves safe mode. */
+var SAFE_MODE_BUILTIN = { 'mgu-updater': ['mgu-updater.service'] };
+function runsInSafeMode(c, u) {
+    return u.runsInSafeMode === true ||
+        (Object.prototype.hasOwnProperty.call(SAFE_MODE_BUILTIN, c.id) && SAFE_MODE_BUILTIN[c.id].indexOf(u.name) >= 0);
+}
+/* { at, reason } while safe mode is on (both null when its file does not
+ * read as written), else null. */
+function readSafeMode() {
+    if (!lstatOrNull(SAFE_MODE_FILE)) return null;
+    var s = readJsonOrNull(SAFE_MODE_FILE) || {};
+    return { at: typeof s.at === 'string' ? s.at : null, reason: typeof s.reason === 'string' ? s.reason : null };
+}
+/* Safe mode off: its file gone and the count from zero, the tools pending
+ * the next start. */
+function leaveSafeMode(state) {
+    rmrf(SAFE_MODE_FILE);
+    writeAtomic(SAFE_MODE_COUNT, '0 ' + bootId() + '\n', 0o644);
+    addPending(state, 'mgu-deploy', SAFE_MODE_LEFT);
+    say('safe mode off: ' + SAFE_MODE_LEFT);
+}
+/* The rootfs ops that lay the guard (its unit, enabled, its recmgr entry
+ * first, and the shutdown mark's drop-in for var-opt-ro.service) as the
+ * installed deploy tool has them, on a unit whose firmware has
+ * var-opt-ro.service, or take the unit, its link and the
+ * drop-in out (remove; remove-all takes its recmgr entry with the other
+ * boot units'); changed: whether anything changes, paths: what they
+ * touch. */
+function safeModePlan(remove) {
+    var unit = path.join(CFG.systemd, SAFE_MODE_UNIT), link = path.join(CFG.systemd, SAFE_MODE_WANTS, SAFE_MODE_UNIT);
+    var mark = path.join(CFG.systemd, SAFE_MODE_MARK.unit + '.d', SAFE_MODE_MARK.name), ops = [];
+    var paths = [unit, link, mark, CFG.recmgr], rec;
+    if (remove) {
+        [link, unit, mark].forEach(function (p) { if (lstatOrNull(p)) ops.push({ type: 'delete', path: p }); });
+        if (lstatOrNull(mark) && fs.readdirSync(path.dirname(mark)).length === 1) ops.push({ type: 'rmdir', path: path.dirname(mark) });
+        return { ops: ops, changed: ops.length > 0, paths: paths };
+    }
+    var cur = path.join(DEPLOY_DIR, 'current');
+    var unitSrc = path.join(cur, SAFE_MODE_UNIT), markSrc = path.join(cur, SAFE_MODE_MARK.from), target = null;
+    /* without the firmware's var-opt-ro.service no start is ever marked: nothing to lay */
+    if (!stockUnit(recmgrBase(SAFE_MODE_MARK.unit)) ||
+        !lstatOrNull(unitSrc) || !lstatOrNull(markSrc) || !lstatOrNull(path.join(cur, 'safe_mode.sh'))) {
+        return { ops: [], changed: false, paths: paths };
+    }
+    rec = recmgrOp([SAFE_MODE_NAME], []);
+    if (rec) ops.push(rec);
+    if (!bytesEqualFile(fs.readFileSync(unitSrc), unit)) ops.push({ type: 'copy', src: unitSrc, path: unit, mode: 0o644 });
+    try { target = fs.readlinkSync(link); } catch (e) { /* not enabled */ }
+    if (target !== '../' + SAFE_MODE_UNIT) {
+        ops.push({ type: 'mkdir', path: path.dirname(link) });
+        ops.push({ type: 'symlink', path: link, target: '../' + SAFE_MODE_UNIT });
+    }
+    if (!bytesEqualFile(fs.readFileSync(markSrc), mark)) {
+        ops.push({ type: 'mkdir', path: path.dirname(mark) });
+        ops.push({ type: 'copy', src: markSrc, path: mark, mode: 0o644 });
+    }
+    return { ops: ops, changed: ops.length > 0, paths: paths };
+}
+/* After an install: the guard as the installed deploy tool has it, so it
+ * runs from the next start (status lays it too, safeModePlan). */
+function laySafeModeGuard() {
+    try {
+        var plan = safeModePlan(false);
+        if (!plan.changed) return;
+        syncDisks();
+        rootfsWindow(plan.ops);
+        runOk(CFG.systemctl, ['daemon-reload']);
+        say('safe mode guard ' + SAFE_MODE_UNIT + ' installed');
+    } catch (e) { warn('the safe mode guard is not installed: ' + e.message); }
+}
+/* safe-mode [--json]: whether it is on; safe-mode off --yes: leaves it. */
+function cmdSafeMode(args) {
+    if (args.positional[0] === 'off') {
+        if (!args.yes) throw refuse('safe-mode off needs --yes');
+        if (!readSafeMode()) { say('safe mode is off'); return 0; }
+        var state = loadState();
+        leaveSafeMode(state);
+        saveState(state);
+        return 0;
+    }
+    if (args.positional.length) throw refuse('usage: safe-mode [--json] | safe-mode off --yes');
+    var s = readSafeMode();
+    if (args.json) { say(JSON.stringify({ safe_mode: s })); return 0; }
+    say(s ? 'safe mode is on' + (s.at ? ' since ' + s.at : '') + (s.reason ? ': ' + s.reason : '') : 'safe mode is off');
+    return 0;
 }
 /* The names a tool has in recmgr's list: its `recmgr` names, and the name
  * of each service and socket unit it installs (a template's with its "@",
@@ -1459,19 +1592,20 @@ function syncLimits() {
     process.stdout.write = function () { return true; };
     try {
         if (!FAKE && process.getuid() !== 0) return { state: 'pending', reason: 'status not run as root' };
-        if (!limitsPlan(installedTools(), null).ops.length) return { state: 'ok', reason: 'up to date' };
+        if (!limitsPlan(installedTools(), null).ops.length && !safeModePlan(false).changed) return { state: 'ok', reason: 'up to date' };
         var busy = rootBusy();
         if (busy) return { state: 'pending', reason: busy };
         locked = statusLock();
         if (!locked) return { state: 'pending', reason: 'another mgu-deploy run holds the lock' };
-        var plan = limitsPlan(installedTools(), null);
-        if (!plan.ops.length) return { state: 'ok', reason: 'up to date' };
+        var plan = limitsPlan(installedTools(), null), guard = safeModePlan(false);
+        if (!plan.ops.length && !guard.changed) return { state: 'ok', reason: 'up to date' };
         busy = rootBusy();
         if (busy) return { state: 'pending', reason: busy };
-        takeSnapshot('service-limits', plan.paths);
-        rootfsWindow(plan.ops);
+        takeSnapshot('service-limits', plan.paths.concat(guard.paths));
+        rootfsWindow(guard.ops.concat(plan.ops));
         runOk(CFG.systemctl, ['daemon-reload']);
-        var line = 'drop-in ' + plan.changed.join(', ');
+        var line = (plan.changed.length ? 'drop-in ' + plan.changed.join(', ') : '') +
+            (guard.changed ? (plan.changed.length ? '; ' : '') + 'safe mode guard ' + SAFE_MODE_UNIT : '');
         process.stderr.write('service limits: ' + line + '\n');
         pruneBackups();
         return { state: 'changed', reason: line };
@@ -1997,6 +2131,7 @@ function validateTool(file, dir, c) {
     (c.units || []).forEach(function (u) {
         if (!safeRel(u.name) || u.name.indexOf('/') >= 0) throw refuse(file + ': bad unit name ' + u.name);
         if (!fs.existsSync(path.join(dir, 'units', u.name))) throw refuse(file + ': payload missing units/' + u.name);
+        if (u.runsInSafeMode !== undefined && u.runsInSafeMode !== true) throw refuse(file + ': runsInSafeMode of ' + u.name + ' is true or absent');
     });
     (c.enable || []).forEach(function (en) {
         if (!safeRel(en.unit) || !safeRel(en.target)) throw refuse(file + ': bad enable entry');
@@ -3412,6 +3547,8 @@ function uptimeS() {
 function cmdVerify() {
     var v = readVerify(), boot = bootId(), due = Object.keys(v).filter(function (id) { return v[id].boot !== boot; });
     if (!due.length) { say('nothing to check at this start'); return 0; }
+    /* their services did not start: checked at a start without safe mode */
+    if (readSafeMode()) { say('safe mode is on: ' + due.join(', ') + ' checked at a start without it'); return 0; }
     var wait = CFG.verifyAfterS - uptimeS();
     if (wait > 0) { say('checking ' + due.join(', ') + ' once the head unit has been up ' + CFG.verifyAfterS + 's'); sleepMs(wait * 1000); }
     var left = {};
@@ -6505,6 +6642,7 @@ function cmdStatus(args, crashList, live, limits, listing) {
     if (live) s.live_installs = live;
     if (listing) s.listing = listing;
     s.app_privacy_record = privacyRecord();
+    s.safe_mode = readSafeMode();
     if (args.json) { say(JSON.stringify(s)); return 0; }
     say('crash handler whitelist: ' + crashList.state + ' (' + crashList.reason + ')');
     say('service limits: ' + limits.state + ' (' + limits.reason + ')');
@@ -6550,6 +6688,7 @@ function cmdStatus(args, crashList, live, limits, listing) {
             s.appmanager.daemon + (s.appmanager.record ? ', adopted' : '') : 'removed'));
     }
     if (s.mainapp_guard) say('no app changes until the next start of the head unit: ' + s.mainapp_guard);
+    if (s.safe_mode) say('safe mode: on' + (s.safe_mode.at ? ' since ' + s.safe_mode.at : '') + "; our tools' units do not start");
     s.lost_apps.forEach(function (a) { say('not registered: ' + a.id + ' ' + a.version + ' (its package is at ' + a.package + ')'); });
     s.pending_reboot.forEach(function (p) { say('pending reboot: ' + p.id + ' - ' + p.reason); });
     if (s.last_apply) {
@@ -6875,7 +7014,7 @@ function cmdInstall(args) {
 function installRun(args, afresh) {
     var files = args.artifacts.length ? args.artifacts.map(function (f) { return path.resolve(f); })
         : args.setup ? [] : kitArtifacts();
-    var stage = stageDir(), state = loadState(), done = [], attempted = false, id8 = isId8(), elsewhere = {};
+    var stage = stageDir(), state = loadState(), done = [], attempted = false, id8 = isId8(), elsewhere = {}, safeWas = null;
     /* an install after a remove-all keeps the deploy tool */
     rmrf(REMOVE_ALL_FILE);
     try {
@@ -6998,6 +7137,10 @@ function installRun(args, afresh) {
             try { relayFiles(x.t, state, x.why); attempted = true; return true; }
             catch (e) { warn(x.t.id + ' ' + x.t.version + ' is not laid again: ' + e.message); return false; }
         }).map(function (x) { return x.t.id; });
+        /* an install that goes through leaves safe mode: off before the
+         * first artifact, so what it starts runs, and back when none does */
+        safeWas = work.length && lstatOrNull(SAFE_MODE_FILE) ? fs.readFileSync(SAFE_MODE_FILE) : null;
+        if (safeWas) rmrf(SAFE_MODE_FILE);
         work.forEach(function (a) {
             /* after the tools, app-privacy among them, before the first app */
             if (a.kind === 'app' && !migrated) {
@@ -7083,8 +7226,14 @@ function installRun(args, afresh) {
             catch (e) { warn('the app manager was not restarted for app-privacy: ' + e.message); }
             /* the record of what this run installed is kept even when the
              * deploy tool's own install fails; that failure still fails the run */
-            try { if (done.length) selfInstall(); }
-            finally { if (attempted) saveState(state); }
+            try { if (done.length) { selfInstall(); laySafeModeGuard(); } }
+            finally {
+                try {
+                    if (safeWas && done.length) leaveSafeMode(state);
+                    else if (safeWas) writeAtomic(SAFE_MODE_FILE, safeWas, 0o644);
+                } catch (e) { warn('safe mode: ' + e.message); }
+                if (attempted) saveState(state);
+            }
         } finally { rmrf(stage); }
     }
     return 0;
@@ -7463,7 +7612,8 @@ function removeSelf(state, queued) {
             if (lstatOrNull(p)) ops.push({ type: 'delete', path: p });
         });
     });
-    var rec = recmgrOp([], names.concat([FALLBACK_NAME]));
+    ops = ops.concat(safeModePlan(true).ops);
+    var rec = recmgrOp([], names.concat([FALLBACK_NAME, SAFE_MODE_NAME]));
     if (rec) ops.push(rec);
     /* what a kept tool (adopted from the App Manager) still has stays */
     var keep = installedTools().filter(function (t) { return t.id !== 'mgu-deploy'; });
@@ -7952,6 +8102,8 @@ var HELP = [
     '  relist                           iDrive 8: list our das-listed apps in custom_apps.json (at boot, before MainApp)',
     '  verify                           check the tools updated for this start; roll back one that does not work (at boot)',
     '  remove-unused                    remove the files tools handed over that no process runs (at boot)',
+    '  safe-mode [--json]               whether safe mode keeps our tools\' units off',
+    '  safe-mode off --yes              leave safe mode: our tools start at the next start',
     '  appmanager [--json]              IterioDev\'s App Manager on this unit: its service and what was adopted',
     '  appmanager adopt [--yes]         take over what it installed; uninstall oap-appmanager removes it',
     '  help                             this text',
@@ -7985,14 +8137,15 @@ function main() {
 function runCommand() {
     var args = parseArgs(process.argv.slice(2)), locked = false;
     var rootOnly = ['install', 'relay', 'setup', 'uninstall', 'remove-all', 'rollback', 'restore', 'fallback', 'updater-token', 'updater-sources', 'apply-pending',
-        'appmanager', 'verify', 'remove-unused']
+        'appmanager', 'verify', 'remove-unused', 'safe-mode']
         .indexOf(args.command) >= 0;
     try {
         if (!FAKE && typeof process.getuid === 'function' && process.getuid() !== 0 && rootOnly) {
             throw refuse('run as root');
         }
         if (rootOnly && !(args.command === 'fallback' && args.positional[0] === 'status') &&
-            !(args.command === 'appmanager' && !args.positional[0]) && !(args.command === 'remove-all' && !args.yes)) {
+            !(args.command === 'appmanager' && !args.positional[0]) && !(args.command === 'remove-all' && !args.yes) &&
+            !(args.command === 'safe-mode' && args.positional[0] !== 'off')) {
             acquireLock(); locked = true;
             try { cleanStale(); } catch (e) { warn('could not remove a killed run\'s files: ' + e.message); }
             var off = guardWhy();
@@ -8023,6 +8176,7 @@ function runCommand() {
         if (args.command === 'verify') return cmdVerify();
         if (args.command === 'remove-unused') return cmdRemoveUnused();
         if (args.command === 'appmanager') return cmdAppManager(args);
+        if (args.command === 'safe-mode') return cmdSafeMode(args);
         throw refuse('unknown command ' + args.command + '\n' + HELP);
     } catch (e) {
         process.stderr.write('mgu-deploy: ' + e.message + '\n');

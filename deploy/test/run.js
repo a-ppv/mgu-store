@@ -2827,11 +2827,11 @@ function testSelf() {
     check('self: deploy/hu artifact deploy builds mgu-deploy@<version>.tgz', builds.every((b) => b.r.status === 0 && fs.existsSync(b.file)),
         builds.map((b) => b.r.stderr).join('\n'));
     check('self: two builds are byte-identical', sha256(fs.readFileSync(builds[0].file)) === sha256(fs.readFileSync(builds[1].file)));
-    check('self: the artifact holds its ten files and its manifest', JSON.stringify(tarList(builds[0].file)) === JSON.stringify([
+    check('self: the artifact holds its thirteen files and its manifest', JSON.stringify(tarList(builds[0].file)) === JSON.stringify([
         'component.json', 'files/fallback_build.js', 'files/mgu-app-fallback-id8.service', 'files/mgu-app-fallback.service',
-        'files/mgu-deploy-apply.service', 'files/mgu-deploy-cleanup.service', 'files/mgu-deploy-verify.service',
-        'files/mgu-deploy.js', 'files/mgu-deploy.sh',
-        'files/oap_link.js', 'files/oap_pack.js']),
+        'files/mgu-deploy-apply.service', 'files/mgu-deploy-cleanup.service', 'files/mgu-deploy-safe-mode.service',
+        'files/mgu-deploy-verify.service', 'files/mgu-deploy.js', 'files/mgu-deploy.sh',
+        'files/oap_link.js', 'files/oap_pack.js', 'files/safe_mode.sh', 'files/var-opt-ro-safe-mode.conf']),
     tarList(builds[0].file).join(' '));
     const built = untar(builds[0].file)['component.json'].data;
     const huText = fs.readFileSync(HU, 'utf8');
@@ -2859,7 +2859,8 @@ function testSelf() {
     // the kit layout: component.json beside the script
     const kit = fs.mkdtempSync(path.join(T, 'kit-'));
     ['mgu-deploy.js', 'mgu-deploy.sh', 'fallback_build.js', 'mgu-app-fallback.service', 'mgu-deploy-apply.service', 'mgu-deploy-verify.service',
-        'mgu-deploy-cleanup.service', 'mgu-app-fallback-id8.service'].forEach((n) =>
+        'mgu-deploy-cleanup.service', 'mgu-app-fallback-id8.service', 'safe_mode.sh', 'mgu-deploy-safe-mode.service',
+        'var-opt-ro-safe-mode.conf'].forEach((n) =>
         fs.copyFileSync(path.join(DEPLOY, 'unit', n), path.join(kit, n)));
     LINK_FILES.forEach((n) => fs.copyFileSync(path.join(TOOLS, n), path.join(kit, n)));
     fs.copyFileSync(path.join(DEPLOY, 'component.json'), path.join(kit, 'component.json'));
@@ -4707,7 +4708,7 @@ function testHuToken() {
         x.stdin(1).toString() === `${TOKEN}\n`, `${x.r.stderr}\n${x.calls.join('\n')}`);
     const staged = Object.keys(untarBuf(x.stdin(0))).sort().join(' ');
     check('hu: the staging upload carries the deploy tool with its linker and packer', staged ===
-        'component.json fallback_build.js mgu-app-fallback-id8.service mgu-app-fallback.service mgu-deploy-apply.service mgu-deploy-cleanup.service mgu-deploy-verify.service mgu-deploy.js mgu-deploy.sh oap_link.js oap_pack.js', staged);
+        'component.json fallback_build.js mgu-app-fallback-id8.service mgu-app-fallback.service mgu-deploy-apply.service mgu-deploy-cleanup.service mgu-deploy-safe-mode.service mgu-deploy-verify.service mgu-deploy.js mgu-deploy.sh oap_link.js oap_pack.js safe_mode.sh var-opt-ro-safe-mode.conf', staged);
     check('hu token: not in any ssh argument, the staging upload or the output',
         x.calls.every((c) => !c.includes(TOKEN)) && !zlib.gunzipSync(x.stdin(0)).includes(TOKEN) &&
         !`${x.r.stdout}${x.r.stderr}`.includes(TOKEN));
@@ -5426,8 +5427,12 @@ function namedTool(id, version, edit) {
  * start limit stopped starts again with an install; iDrive 7 and 8. */
 function testServiceLimits() {
     const LIMITS = '# Written by mgu-deploy for every service a tool installs: a crash leaves no core dump for the\n' +
-        '# crash handler, which would restart the head unit, and a service that keeps failing stops.\n' +
-        '[Unit]\nStartLimitIntervalSec=600\nStartLimitBurst=20\n\n[Service]\nLimitCORE=1\n';
+        '# crash handler, which would restart the head unit, a service that keeps failing stops, and\n' +
+        '# it does not start in safe mode.\n' +
+        '[Unit]\nStartLimitIntervalSec=600\nStartLimitBurst=20\nWants=mgu-deploy-safe-mode.service\nAfter=mgu-deploy-safe-mode.service\n' +
+        'ConditionPathExists=!/var/opt/mgu-deploy/safe-mode\n\n[Service]\nLimitCORE=1\n';
+    const SOCKET = '# Written by mgu-deploy for every unit a tool installs: it does not start in safe mode.\n' +
+        '[Unit]\nWants=mgu-deploy-safe-mode.service\nAfter=mgu-deploy-safe-mode.service\nConditionPathExists=!/var/opt/mgu-deploy/safe-mode\n';
     const sys = (root, rel) => root.p(`etc/systemd/system/${rel}`);
     const dropIn = (root, unit) => sys(root, `${unit}.d/zz-mgu-deploy-limits.conf`);
     const limitsState = (res) => { try { return JSON.parse(res.stdout).service_limits; } catch (e) { return null; } };
@@ -5435,9 +5440,9 @@ function testServiceLimits() {
 
     const root = fakeRoot({ recmgr: ['fixture-tool'] });
     let r = root.run(['install', '--artifact', toolArtifact('0.2.0'), '--yes']);
-    check('limits: a fresh tool install gives its service the drop-in, not its socket, and reloads systemd',
+    check('limits: a fresh tool install gives its service the drop-in, its socket the safe mode condition, and reloads systemd',
         r.status === 0 && fs.readFileSync(dropIn(root, 'fixture-tool.service'), 'utf8') === LIMITS &&
-        mode(dropIn(root, 'fixture-tool.service')) === 0o644 && !fs.existsSync(sys(root, 'fixture-tool.socket.d')) &&
+        mode(dropIn(root, 'fixture-tool.service')) === 0o644 && fs.readFileSync(dropIn(root, 'fixture-tool.socket'), 'utf8') === SOCKET &&
         root.systemctlCalls().includes('daemon-reload'), r.out);
     check('limits: a stock unit gets none', !fs.existsSync(sys(root, 'stock.service.d')));
     const snap = fs.readdirSync(root.p('var/opt/mgu-deploy/backups')).filter((n) => /-install$/.test(n)).sort().pop();
@@ -5550,9 +5555,11 @@ function testServiceLimits() {
     const h0 = clean.hash();
     clean.run(['install', '--artifact', toolArtifact('0.2.0'), '--yes']);
     r = clean.run(['uninstall', 'fixture-tool', '--yes']);
+    // the deploy tool's safe mode guard stays with the deploy tool
+    const guardRel = (rel) => /mgu-deploy-safe-mode|^etc\/systemd\/system\/var-opt-ro\.service\.d/.test(rel);
     check('limits: uninstall removes the drop-in with its folder',
         r.status === 0 && !fs.existsSync(sys(clean, 'fixture-tool.service.d')) &&
-        !treeDiff(h0, clean.hash((rel) => rel.startsWith('var/opt/mgu-deploy') || rel.startsWith('var/opt/public'))).split('\n')
+        !treeDiff(h0, clean.hash((rel) => rel.startsWith('var/opt/mgu-deploy') || rel.startsWith('var/opt/public') || guardRel(rel))).split('\n')
             .some((l) => /etc\/systemd/.test(l)), r.out);
 
     // a restore to the snapshot before the install takes the drop-in out with the tool
@@ -5584,6 +5591,316 @@ function testServiceLimits() {
         check(`limits: iDrive 8${noRecmgr ? ' without recmgr\'s list' : ''}: uninstall removes it`,
             un.status === 0 && !fs.existsSync(sys(r8, 'fixture-tool.service.d')), un.out);
     });
+}
+
+/* Safe mode (deploy/README.md, "Safe mode"): safe_mode.sh's count of
+ * failed starts against made-up restart records and uptimes, on the sh the
+ * tests run under; then the deploy tool: the drop-in's condition for a
+ * tool's units and none for one that runs in safe mode, the guard laid by
+ * an install and by status, safe_mode in status --json, the boot check
+ * waiting, leaving safe mode (safe-mode off, an install that goes through,
+ * not a refused or failed one) and remove-all taking the guard out. */
+function testSafeMode() {
+    const SCRIPT = path.join(DEPLOY, 'unit', 'safe_mode.sh');
+    const G = fs.mkdtempSync(path.join(T, 'guard-'));
+    const gp = (rel) => path.join(G, rel);
+    fs.mkdirSync(gp('var/opt/mgu-deploy'), { recursive: true });
+    const now = () => Math.floor(Date.now() / 1000);
+    // sqlite3 stands in for recmgr's crash statistics: its last crash key, from a file
+    write(gp('bin/sqlite3'), `#!/bin/sh\n[ -f '${gp('crash-key')}' ] || exit 1\necho 500\ncat '${gp('crash-key')}'\n`, 0o755);
+    write(gp('var/opt/public/sin/recmgr/recmgr_stats.db'), 'stats\n');
+    const crashKey = (k) => (k === null ? fs.rmSync(gp('crash-key'), { force: true }) : write(gp('crash-key'), `${k}\n`));
+    crashKey(5);
+    const env = { PATH: `${gp('bin')}:${process.env.PATH}`, MGU_DEPLOY_VAR_OPT: gp('var/opt'), MGU_DEPLOY_BOOT_ID: gp('proc/boot_id'),
+        MGU_DEPLOY_PROC: gp('proc'), MGU_DEPLOY_PROC_STAT: gp('proc/stat') };
+    const guard = (cmd) => cp.spawnSync('sh', [SCRIPT, cmd], { encoding: 'utf8', env, timeout: 15000 });
+    const up = (s) => write(gp('proc/uptime'), `${s}.42 77.00\n`);
+    let n8 = 0;
+    // a start of the head unit: a new boot id and btime; recmgr and crashhandler delete their records
+    const start = () => {
+        n8 += 1;
+        write(gp('proc/boot_id'), `${String(n8).padStart(8, '0')}-aaaa-4bbb-8ccc-dddddddddddd\n`);
+        write(gp('proc/stat'), `cpu 0 0 0 0\nbtime ${now() - 20}\n`);
+        ['recmgr', 'crashhandler'].forEach((m) => fs.rmSync(gp(`var/opt/public/sin/${m}/restartInfo.xml`), { force: true }));
+        up(20);
+    };
+    const bootNow = () => fs.readFileSync(gp('proc/boot_id'), 'utf8').trim();
+    const record = (m, at) => {
+        const f = gp(`var/opt/public/sin/${m}/restartInfo.xml`);
+        write(f, '<restartInfo/>\n');
+        fs.utimesSync(f, at, at);
+    };
+    const flag = gp('var/opt/mgu-deploy/safe-mode');
+    const countFile = gp('var/opt/mgu-deploy/safe-mode-count');
+    const count = () => (fs.existsSync(countFile) ? fs.readFileSync(countFile, 'utf8').split(' ')[0] : null);
+    // how this start ends, then the next start's boot step
+    const crashAt = (s, m) => { up(s); record(m || 'recmgr', now()); guard('mark'); };
+    const endAt = (s) => { up(s); guard('mark'); };
+    const next = () => { start(); return guard('boot'); };
+
+    start();
+    let r = guard('boot');
+    check('safe mode: the first start counts nothing, no flag',
+        r.status === 0 && fs.readFileSync(countFile, 'utf8') === `0 ${bootNow()}\n` && !fs.existsSync(flag), r.stdout + r.stderr);
+    crashAt(60);
+    check('safe mode: the shutdown mark records a restart recmgr asked for, with the uptime',
+        fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8') === `${bootNow()} crash 60 recmgr\n`);
+    r = next();
+    check('safe mode: a restart after a crash within 2 minutes counts', count() === '1' && /a restart after a crash \(recmgr\) at 60 s; 1 failed/.test(r.stdout), r.stdout);
+    r = guard('boot');
+    check('safe mode: the boot step run again in the same start counts nothing twice', count() === '1' && r.stdout === '', r.stdout);
+    crashAt(150, 'crashhandler');
+    next();
+    check('safe mode: a crash restart after 2 minutes neither counts nor clears', count() === '1');
+    crashAt(30);
+    next();
+    endAt(150);
+    next();
+    check('safe mode: a switch-off or a restart the HMI or the Store asked for (a shutdown without a restart record) clears the count',
+        count() === '0');
+    crashAt(30);
+    next();
+    endAt(25);
+    next();
+    check('safe mode: such a shutdown within 2 minutes (a short drive, or a restart whose records were lost) neither counts nor clears',
+        count() === '1');
+    endAt(40);
+    next();
+    check('safe mode: nor does a second', count() === '1');
+    // recmgr's startup deletes its restartInfo.xml, also one of the same start: its crash statistics still tell
+    crashKey(9);
+    endAt(12);
+    check('safe mode: a row recmgr added to its crash statistics in this start marks a crash restart',
+        fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8') === `${bootNow()} crash 12 recmgr_stats\n`);
+    next();
+    check('safe mode: and counts', count() === '2');
+    endAt(60);
+    next();
+    check('safe mode: statistics that did not grow in the start: no crash', count() === '2' &&
+        /normal 60$/.test(fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8').trim()));
+    crashKey(null);
+    endAt(60);
+    crashKey(12);
+    next();
+    check('safe mode: no statistics at the boot step: no baseline, nothing taken from them', count() === '2' &&
+        /normal 60$/.test(fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8').trim()));
+    write(gp('crash-key'), 'database is locked\n');
+    endAt(60);
+    next();
+    check('safe mode: statistics that do not read as a key: no crash', count() === '2' &&
+        /normal 60$/.test(fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8').trim()));
+    crashKey(12);
+    endAt(200);
+    next();
+    check('safe mode: a normal end after 2 minutes clears it', count() === '0');
+    crashAt(30);
+    next();
+    // a power cut: no shutdown mark for this start
+    next();
+    check('safe mode: a start with no shutdown mark (power cut) neither counts nor clears', count() === '1');
+    crashAt(30);
+    next();
+    check('safe mode: and the count goes on after it', count() === '2');
+    write(gp('var/opt/mgu-deploy/restart-requested'), `${bootNow()}\n`);
+    crashAt(20);
+    next();
+    check('safe mode: a restart our tools asked for (restart-requested names the start) does not count', count() === '0');
+    crashAt(400);
+    next();
+    check('safe mode: a crash restart after 5 minutes clears it', count() === '0');
+    // four in a row
+    [['recmgr', 30], ['crashhandler', 45], ['recmgr', 90]].forEach(([m, s]) => { crashAt(s, m); next(); });
+    check('safe mode: three in a row: no safe mode', count() === '3' && !fs.existsSync(flag));
+    crashAt(15);
+    r = next();
+    let f = null;
+    try { f = JSON.parse(fs.readFileSync(flag, 'utf8')); } catch (e) { /* checked below */ }
+    check('safe mode: the fourth in a row turns it on: the flag with the time and the reason, the count from zero',
+        f && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(f.at) && /^4 starts in a row ended in a restart after a crash within 120 s$/.test(f.reason) &&
+        count() === '0' && /safe mode: on/.test(r.stdout), `${JSON.stringify(f)} ${r.stdout}`);
+    const flagBytes = fs.readFileSync(flag);
+    [1, 2, 3, 4].forEach(() => { crashAt(10); next(); });
+    check('safe mode: once on, the flag stays as it was written', fs.readFileSync(flag).equals(flagBytes));
+    fs.unlinkSync(flag);
+    // a start up 5 minutes clears the count (the guard's second step)
+    crashAt(30);
+    next();
+    crashAt(30);
+    next();
+    up(299);
+    const t0 = Date.now();
+    r = guard('up');
+    check('safe mode: a start that stays up 5 minutes clears the count, waiting until then', r.status === 0 && count() === '0' &&
+        Date.now() - t0 >= 500 && /up 300 s/.test(r.stdout), r.stdout + r.stderr);
+    crashAt(30);
+    next();
+    up(310);
+    guard('up');
+    crashAt(30);
+    next();
+    check('safe mode: and a crash after it starts the count at one', count() === '1');
+
+    // corrupt or missing files never turn safe mode on
+    const corrupt = (what, fn) => {
+        const was = count();
+        fn();
+        crashAt(30);
+        next();
+        return { was, now: count() };
+    };
+    let c = corrupt('count', () => write(countFile, `9 ${bootNow()}\n`));
+    check('safe mode: a count above the threshold reads as no count: nothing counted', c.now === '0' && !fs.existsSync(flag), JSON.stringify(c));
+    write(countFile, `3 ${bootNow()}\n`);
+    write(gp('var/opt/mgu-deploy/last-shutdown'), 'garbage\n');
+    next();
+    check('safe mode: a shutdown mark that does not read as written counts nothing', count() === '3' && !fs.existsSync(flag));
+    write(countFile, '3\n');
+    crashAt(30);
+    next();
+    check('safe mode: a count without its start counts nothing', count() === '0' && !fs.existsSync(flag));
+    write(countFile, `3 ${bootNow()}\n`);
+    fs.unlinkSync(gp('var/opt/mgu-deploy/last-shutdown'));
+    next();
+    check('safe mode: no shutdown mark counts nothing', count() === '3' && !fs.existsSync(flag));
+    fs.unlinkSync(countFile);
+    crashAt(30);
+    next();
+    check('safe mode: no count file counts nothing', count() === '0' && !fs.existsSync(flag));
+    write(countFile, `3 ${bootNow()}\n`);
+    up(30);
+    record('recmgr', now() - 3600);
+    guard('mark');
+    check('safe mode: a restart record from before this start is not this start\'s', /normal 30$/.test(fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8').trim()));
+    record('recmgr', now() + 120);
+    guard('mark');
+    check('safe mode: nor one from after now', /normal 30$/.test(fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8').trim()));
+    next();
+    check('safe mode: so that start counts nothing', count() === '3' && !fs.existsSync(flag));
+    write(countFile, `3 ${bootNow()}\n`);
+    fs.writeFileSync(gp('proc/uptime'), 'x\n');
+    record('recmgr', now());
+    const markBefore = fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8');
+    r = guard('mark');
+    check('safe mode: no mark without the uptime', r.status === 0 && fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8') === markBefore);
+    fs.writeFileSync(gp('proc/boot_id'), '');
+    r = guard('boot');
+    check('safe mode: no boot id: nothing written, exit 0', r.status === 0 && count() === '3' && !fs.existsSync(flag));
+    const bare = fs.mkdtempSync(path.join(T, 'bare-'));
+    r = cp.spawnSync('sh', [SCRIPT, 'boot'], { encoding: 'utf8', env: Object.assign({}, env, { MGU_DEPLOY_VAR_OPT: bare }) });
+    check('safe mode: without the deploy tool\'s folder it writes nothing', r.status === 0 && fs.readdirSync(bare).length === 0);
+    check('safe mode: the script leaves no temporary file', fs.readdirSync(gp('var/opt/mgu-deploy')).every((n) => !/\.tmp$/.test(n)),
+        fs.readdirSync(gp('var/opt/mgu-deploy')).join(' '));
+
+    // ---- the deploy tool ----
+    const sys = (root, rel) => root.p(`etc/systemd/system/${rel}`);
+    const dropIn = (root, unit) => fs.readFileSync(sys(root, `${unit}.d/zz-mgu-deploy-limits.conf`), 'utf8');
+    const COND = 'ConditionPathExists=!/var/opt/mgu-deploy/safe-mode';
+    const out = fs.mkdtempSync(path.join(T, 'safe-'));
+    const kit = (version) => {
+        const res = hu(['artifact', fixtureCopy(version, (x) => {
+            x.units.push({ name: 'fixture-tool-boot.service', from: 'systemd/fixture-tool.service', runsInSafeMode: true });
+        }), '--out', out]);
+        if (res.status !== 0) throw new Error(res.stderr);
+        return path.join(out, `fixture-tool@${version}.tgz`);
+    };
+    const manifest = JSON.parse(untar(kit('0.2.0'))['component.json'].data);
+    check('safe mode: the kit carries runsInSafeMode for its unit only', JSON.stringify(manifest.units) === JSON.stringify([
+        { name: 'fixture-tool.socket' }, { name: 'fixture-tool.service' }, { name: 'fixture-tool-boot.service', runsInSafeMode: true }]),
+    JSON.stringify(manifest.units));
+    const root = fakeRoot({ recmgr: ['fixture-tool'] });
+    r = root.run(['install', '--artifact', kit('0.2.0'), '--yes']);
+    check('safe mode: no guard on a unit without the firmware\'s var-opt-ro.service (no start would be marked)',
+        r.status === 0 && !fs.existsSync(sys(root, 'mgu-deploy-safe-mode.service')) && !fs.existsSync(sys(root, 'var-opt-ro.service.d')), r.out);
+    write(root.p('lib/systemd/system/var-opt-ro.service'), '[Service]\nType=oneshot\nExecStart=/bin/mount -o remount,ro /var/opt\n');
+    r = root.run(['install', '--artifact', kit('0.2.0'), '--yes']);
+    const svc = dropIn(root, 'fixture-tool.service');
+    check('safe mode: a tool\'s service: its limits, ordered after the guard, off in safe mode',
+        r.status === 0 && svc.includes('StartLimitBurst=20') && svc.includes('LimitCORE=1') && svc.includes(COND) &&
+        svc.includes('Wants=mgu-deploy-safe-mode.service') && svc.includes('After=mgu-deploy-safe-mode.service'), r.out + svc);
+    const sock = dropIn(root, 'fixture-tool.socket');
+    check('safe mode: its socket: off in safe mode, nothing else', sock.includes(COND) && sock.includes('After=mgu-deploy-safe-mode.service') &&
+        !/\[Service\]|StartLimit/.test(sock), sock);
+    const plainLimits = dropIn(root, 'fixture-tool-boot.service');
+    check('safe mode: a unit that runs in safe mode: the limits alone', !plainLimits.includes('safe-mode') && plainLimits.includes('LimitCORE=1'),
+        plainLimits);
+    const rec = fs.readFileSync(root.p('etc/recmgr-restartlist.conf'), 'utf8');
+    check('safe mode: the install lays the guard: its unit, enabled, the shutdown mark for var-opt-ro.service, its recmgr entry in both sections',
+        fs.readFileSync(sys(root, 'mgu-deploy-safe-mode.service'), 'utf8') === fs.readFileSync(path.join(DEPLOY, 'unit', 'mgu-deploy-safe-mode.service'), 'utf8') &&
+        fs.readlinkSync(sys(root, 'multi-user.target.wants/mgu-deploy-safe-mode.service')) === '../mgu-deploy-safe-mode.service' &&
+        fs.readFileSync(sys(root, 'var-opt-ro.service.d/40-mgu-deploy-safe-mode.conf'), 'utf8') ===
+            fs.readFileSync(path.join(DEPLOY, 'unit', 'var-opt-ro-safe-mode.conf'), 'utf8') &&
+        /\[Whitelist\][^[]*mgu-deploy-safe-mode/.test(rec) && /\[WhitelistExitSuccess\][^[]*mgu-deploy-safe-mode/.test(rec) &&
+        fs.existsSync(root.p('var/opt/mgu-deploy/current/safe_mode.sh')), r.out + rec);
+    r = root.run(['status', '--json']);
+    let st = JSON.parse(r.stdout);
+    check('safe mode: status after the install changes nothing and reports safe mode off',
+        r.status === 0 && st.safe_mode === null && st.service_limits.state === 'ok' && !r.stderr, r.out);
+    // a deploy tool update that brings the guard: status lays it
+    ['mgu-deploy-safe-mode.service', 'multi-user.target.wants/mgu-deploy-safe-mode.service', 'var-opt-ro.service.d'].forEach((rel) =>
+        fs.rmSync(sys(root, rel), { recursive: true }));
+    write(sys(root, 'fixture-tool.service.d/zz-mgu-deploy-limits.conf'), 'older\n');
+    r = root.run(['status', '--json']);
+    st = JSON.parse(r.stdout);
+    check('safe mode: status lays the guard and the drop-ins again',
+        r.status === 0 && st.service_limits.state === 'changed' && /safe mode guard mgu-deploy-safe-mode.service/.test(st.service_limits.reason) &&
+        fs.existsSync(sys(root, 'mgu-deploy-safe-mode.service')) && fs.existsSync(sys(root, 'var-opt-ro.service.d/40-mgu-deploy-safe-mode.conf')) &&
+        dropIn(root, 'fixture-tool.service') === svc, r.out);
+
+    // safe mode on
+    const FLAG = root.p('var/opt/mgu-deploy/safe-mode');
+    const on = '{"at": "2026-11-09T10:00:00Z", "reason": "4 starts in a row ended in a restart after a crash within 120 s"}\n';
+    write(FLAG, on);
+    st = root.status();
+    check('safe mode: status --json reports it', JSON.stringify(st.safe_mode) ===
+        JSON.stringify({ at: '2026-11-09T10:00:00Z', reason: '4 starts in a row ended in a restart after a crash within 120 s' }), JSON.stringify(st.safe_mode));
+    r = root.run(['status']);
+    check('safe mode: plain status says so', r.stdout.includes('safe mode: on since 2026-11-09T10:00:00Z'), r.stdout);
+    write(FLAG, 'torn');
+    check('safe mode: a flag that does not read as written is still on', JSON.stringify(root.status().safe_mode) === '{"at":null,"reason":null}');
+    write(FLAG, on);
+    // the boot check waits for a start without safe mode
+    write(root.p('var/opt/mgu-deploy/verify.json'), JSON.stringify({ 'fixture-tool': { version: '0.2.0', previous: null, boot: 'boot-0' } }));
+    r = root.run(['verify'], { MGU_DEPLOY_VERIFY_AFTER_S: '0' });
+    check('safe mode: the boot check waits, its entries kept', r.status === 0 && /safe mode is on: fixture-tool checked at a start without it/.test(r.out) &&
+        !!readJson(root.p('var/opt/mgu-deploy/verify.json'))['fixture-tool'], r.out);
+    fs.unlinkSync(root.p('var/opt/mgu-deploy/verify.json'));
+    r = root.run(['safe-mode', 'off']);
+    check('safe mode: safe-mode off needs --yes', r.status === 2 && fs.existsSync(FLAG), r.out);
+    r = root.run(['safe-mode', '--json']);
+    check('safe mode: safe-mode --json', r.status === 0 && JSON.parse(r.stdout).safe_mode.at === '2026-11-09T10:00:00Z', r.out);
+    r = root.run(['safe-mode', 'off', '--yes']);
+    st = root.status();
+    check('safe mode: safe-mode off --yes (the Store\'s button): the flag gone, the count from zero, the tools pending the next start',
+        r.status === 0 && !fs.existsSync(FLAG) && st.safe_mode === null &&
+        fs.readFileSync(root.p('var/opt/mgu-deploy/safe-mode-count'), 'utf8') === '0 boot-1\n' &&
+        st.pending_reboot.some((p) => p.id === 'mgu-deploy' && p.reason === 'our tools start at the next start'), r.out + JSON.stringify(st.pending_reboot));
+    r = root.run(['safe-mode', 'off', '--yes']);
+    check('safe mode: safe-mode off when it is off', r.status === 0 && /safe mode is off/.test(r.stdout), r.out);
+    // an install that goes through leaves it
+    write(FLAG, on);
+    r = root.run(['install', '--artifact', kit('0.2.1'), '--yes']);
+    check('safe mode: an install that goes through leaves it, the tools pending the next start',
+        r.status === 0 && !fs.existsSync(FLAG) && /safe mode off/.test(r.out) &&
+        root.status().pending_reboot.some((p) => p.id === 'mgu-deploy' && p.reason === 'our tools start at the next start'), r.out);
+    write(FLAG, on);
+    r = root.run(['install', '--artifact', path.join(T, 'no-such.tgz'), '--yes']);
+    check('safe mode: a refused install keeps it', r.status === 2 && fs.readFileSync(FLAG, 'utf8') === on, r.out);
+    // a failed install keeps it: its update crash-loops and goes back
+    const fr = fakeRoot({ recmgr: ['fixture-tool'], active: 'fixture-tool.service' });
+    fr.run(['install', '--artifact', plainArtifact('0.2.0'), '--yes']);
+    fs.writeFileSync(fr.unitFile('fixture-tool.service.crash'), `${path.join(fr.tool('fixture-tool'), 'current')} versions/0.4.0\n`);
+    write(fr.p('var/opt/mgu-deploy/safe-mode'), on);
+    r = fr.run(['install', '--artifact', plainArtifact('0.4.0'), '--yes']);
+    check('safe mode: a failed install keeps it', r.status === 1 && fs.readFileSync(fr.p('var/opt/mgu-deploy/safe-mode'), 'utf8') === on &&
+        !fr.status().pending_reboot.some((p) => p.id === 'mgu-deploy'), r.out);
+    // remove-all takes the guard out
+    fs.unlinkSync(FLAG);
+    r = root.run(['remove-all', '--yes']);
+    const recAfter = fs.readFileSync(root.p('etc/recmgr-restartlist.conf'), 'utf8');
+    check('safe mode: remove-all takes the guard, its link, the shutdown mark and its recmgr entry out',
+        r.status === 0 && !fs.existsSync(sys(root, 'mgu-deploy-safe-mode.service')) &&
+        !fs.existsSync(sys(root, 'multi-user.target.wants/mgu-deploy-safe-mode.service')) && !fs.existsSync(sys(root, 'var-opt-ro.service.d')) &&
+        !recAfter.includes('mgu-deploy-safe-mode'), r.out + recAfter);
 }
 
 /* The crash handler's restart list, as iDrive 8 ships it (no newline at
@@ -9507,6 +9824,7 @@ const SUITES = [
     testInternet,
     testCrashList,
     testServiceLimits,
+    testSafeMode,
     testBootLists,
     testListSafety,
     testDurableSwitch,
