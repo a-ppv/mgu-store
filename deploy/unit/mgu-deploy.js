@@ -6996,19 +6996,17 @@ function confirmYes(args, what) {
 /* install --leave: the tools a later install of this caller installs, which
  * no install of this run (an app's afresh among them) lays again */
 var leaveIds = [];
-/* The outermost install of this run: { short: an artifact or tool it lays
- * again failed without failing it, depth: installs inside it (an app
- * installed afresh) }, null outside one. */
+/* The outermost install of this run, null outside one: { short } (an
+ * artifact or tool it, or an install inside it, lays again failed without
+ * failing it). */
 var outerInstall = null;
 /* An install that goes through as a whole leaves safe mode; one that
  * fails, falls short, stops or is cut short keeps it (settleSafeMode). Only
- * the outermost one lifts and settles it. */
+ * the outermost one settles it; one inside it (an app installed afresh)
+ * counts towards it. */
 function cmdInstall(args) {
-    if (outerInstall) {
-        outerInstall.depth += 1;
-        try { return installAll(args); } finally { outerInstall.depth -= 1; }
-    }
-    var run = outerInstall = { short: false, depth: 0 }, ok = false;
+    if (outerInstall) return installAll(args);
+    var run = outerInstall = { short: false }, ok = false;
     try {
         return onGuardStop(function () { settleSafeMode(false); }, function () {
             var code = installAll(args);
@@ -7169,7 +7167,7 @@ function installRun(args, afresh) {
             catch (e) { outerInstall.short = true; warn(x.t.id + ' ' + x.t.version + ' is not laid again: ' + e.message); return false; }
         }).map(function (x) { return x.t.id; });
         /* lifted before the first artifact, so what it starts runs (cmdInstall settles it) */
-        if (work.length && outerInstall.depth === 0 && lstatOrNull(SAFE_MODE_FILE)) {
+        if (work.length && lstatOrNull(SAFE_MODE_FILE)) {
             mkdirp(CFG.run);
             fs.writeFileSync(SAFE_MODE_LIFTED, process.pid + '\n');
         }
