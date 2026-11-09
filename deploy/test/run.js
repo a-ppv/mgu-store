@@ -5291,7 +5291,7 @@ function testSafeModeAfresh() {
     const file = sourceArtifact('1.2.3');
     const on = '{"at": "2026-11-09T10:00:00Z", "reason": "test"}\n';
     const entryFile = (root) => root.p(`var/opt/public/oap/oap_${MGR}/data/apps/robertn_demo.json`);
-    const setup = () => {
+    const setup = (fresh) => {
         const root = donorRoot({ recmgr: ['fixture-tool'], active: 'fixture-tool.service' });
         [file, plainArtifact('0.2.0')].forEach((a) => {
             const res = root.run(['install', '--artifact', a, '--yes']);
@@ -5302,7 +5302,7 @@ function testSafeModeAfresh() {
         e.NO_FORCED_UPDATE_NEEDED = false;
         fs.writeFileSync(entryFile(root), JSON.stringify(e));
         // the tool lacks its unit: the install lays it again from its kept copy
-        fs.unlinkSync(root.p('etc/systemd/system/fixture-tool.service'));
+        if (!fresh) fs.unlinkSync(root.p('etc/systemd/system/fixture-tool.service'));
         write(root.p('var/opt/mgu-deploy/safe-mode'), on);
         return root;
     };
@@ -5315,11 +5315,24 @@ function testSafeModeAfresh() {
         r.status === 0 && r.out.includes('laid again from the copy kept here') && r.out.includes('robertn_demo 1.2.3 installed afresh') &&
         !on_(root) && !lifted(root) && root.status().pending_reboot.some((p) => p.id === 'mgu-deploy'), r.out);
 
-    root = setup();
-    fs.writeFileSync(root.unitFile('fixture-tool.service.crash'), `${path.join(root.tool('fixture-tool'), 'current')} versions/0.2.0\n`);
+    // an app installed afresh, nothing else to do
+    root = setup(true);
     r = root.run(['install', '--artifact', file, '--yes']);
-    check('safe mode afresh: a tool laid again that fails (warned) and an app installed afresh that goes through keep it',
+    check('safe mode afresh: an install that only installs an app afresh, which goes through, leaves it',
+        r.status === 0 && !r.out.includes('laid again') && r.out.includes('robertn_demo 1.2.3 installed afresh') && !on_(root) && !lifted(root), r.out);
+    root = setup(true);
+    r = root.run(['install', '--artifact', file, '--yes'], { FAKE_MGR_REJECT: '1' });
+    check('safe mode afresh: an install that only installs an app afresh, which fails, keeps it',
+        r.status === 1 && r.out.includes('installing afresh failed: robertn_demo') && on_(root) && !lifted(root), r.out);
+
+    // the tool's first lay fails (its next start runs), the app's install afresh lays it again and goes through
+    root = setup();
+    const starts = Number(fs.readFileSync(root.unitFile('fixture-tool.service.starts'), 'utf8'));
+    fs.writeFileSync(root.unitFile('fixture-tool.service.crash'), `${path.join(root.tool('fixture-tool'), 'current')} versions/0.2.0 ${starts + 1}\n`);
+    r = root.run(['install', '--artifact', file, '--yes']);
+    check('safe mode afresh: a tool laid again that fails (warned), then is laid again by the app\'s install afresh, which goes through, keeps it',
         r.status === 0 && /fixture-tool 0\.2\.0 is not laid again/.test(r.out) && r.out.includes('robertn_demo 1.2.3 installed afresh') &&
+        fs.existsSync(root.p('etc/systemd/system/fixture-tool.service')) && (r.out.match(/is not laid again/g) || []).length === 1 &&
         on_(root) && !lifted(root), r.out);
 
     root = setup();

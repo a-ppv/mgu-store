@@ -1794,15 +1794,15 @@ tool's own update are through. An install that fails, partly or wholly,
 falls short (a tool it lays again fails, warned), or that the MainApp guard
 stops ends the lift and keeps it; one cut short leaves the lift until the
 next run of the deploy tool or the next start (a power cut included), as
-`/run` does not outlive a start. Only the outermost install lifts and
-settles it: an app installed afresh inside it does neither. `safe-mode off
---yes` removes it too: the Store's Leave safe mode, through the updater. Either way the count starts again, the
-tools start at the next start of the head unit, and until then `status`
-lists `mgu-deploy` under `pending_reboot` (`our tools start at the next
-start`). The boot check (`verify`) waits for a start without safe mode.
-`status --json` reports `safe_mode: {at, reason}` while it is on (both null
-for a file that does not read as written), else `null`; `safe-mode
-[--json]` says the same.
+`/run` does not outlive a start. Only the outermost install settles it;
+an app installed afresh inside it counts towards it. `safe-mode off --yes`
+removes it too: the Store's Leave safe mode, through the updater. Either
+way the count starts again, the tools start at the next start of the head
+unit, and until then `status` lists `mgu-deploy` under `pending_reboot`
+(`our tools start at the next start`). The boot check (`verify`) waits
+for a start without safe mode. `status --json` reports `safe_mode: {at,
+reason}` while it is on (both null for a file that does not read as
+written), else `null`; `safe-mode [--json]` says the same.
 
 ### One transaction per artifact
 
