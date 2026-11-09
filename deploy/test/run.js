@@ -329,6 +329,7 @@ function fakeRoot(opts) {
         MGU_DEPLOY_PROC: p('proc'),
         MGU_DEPLOY_PROC_STAT: p('proc/stat'),
         MGU_DEPLOY_PROC_MOUNTS: p('proc/mounts'),
+        MGU_DEPLOY_RUN: p('run/mgu-deploy'),
         MGU_DEPLOY_CODING: p('dev/shm/rawcodingdata'),
         MGU_DEPLOY_BOOT_ID: p('proc/boot_id'),
         MGU_DEPLOY_SYSTEMCTL: path.join(HERE, 'fake_systemctl.sh'),
@@ -5430,9 +5431,9 @@ function testServiceLimits() {
         '# crash handler, which would restart the head unit, a service that keeps failing stops, and\n' +
         '# it does not start in safe mode.\n' +
         '[Unit]\nStartLimitIntervalSec=600\nStartLimitBurst=20\n' +
-        'ConditionPathExists=!/var/opt/mgu-deploy/safe-mode\n\n[Service]\nLimitCORE=1\n';
+        'ConditionPathExists=|!/var/opt/mgu-deploy/safe-mode\nConditionPathExists=|/run/mgu-deploy/safe-mode-lifted\n\n[Service]\nLimitCORE=1\n';
     const SOCKET = '# Written by mgu-deploy for every unit a tool installs: it does not start in safe mode.\n' +
-        '[Unit]\nConditionPathExists=!/var/opt/mgu-deploy/safe-mode\n';
+        '[Unit]\nConditionPathExists=|!/var/opt/mgu-deploy/safe-mode\nConditionPathExists=|/run/mgu-deploy/safe-mode-lifted\n';
     const sys = (root, rel) => root.p(`etc/systemd/system/${rel}`);
     const dropIn = (root, unit) => sys(root, `${unit}.d/zz-mgu-deploy-limits.conf`);
     const limitsState = (res) => { try { return JSON.parse(res.stdout).service_limits; } catch (e) { return null; } };
@@ -5731,12 +5732,6 @@ function testSafeMode() {
     [1, 2, 3, 4].forEach(() => { crashAt(10); next(); });
     check('safe mode: once on, the flag stays as it was written', fs.readFileSync(flag).equals(flagBytes));
     fs.unlinkSync(flag);
-    // safe mode an install held aside and did not settle (the run was cut short): back at the shutdown
-    write(gp('var/opt/mgu-deploy/safe-mode.held'), flagBytes);
-    endAt(200);
-    check('safe mode: an install\'s held flag is back at the shutdown', fs.readFileSync(flag).equals(flagBytes) &&
-        !fs.existsSync(gp('var/opt/mgu-deploy/safe-mode.held')));
-    fs.unlinkSync(flag);
     next();
     // a start up 5 minutes clears the count (the guard's second step)
     crashAt(30);
@@ -5804,7 +5799,7 @@ function testSafeMode() {
     // ---- the deploy tool ----
     const sys = (root, rel) => root.p(`etc/systemd/system/${rel}`);
     const dropIn = (root, unit) => fs.readFileSync(sys(root, `${unit}.d/zz-mgu-deploy-limits.conf`), 'utf8');
-    const COND = 'ConditionPathExists=!/var/opt/mgu-deploy/safe-mode';
+    const COND = 'ConditionPathExists=|!/var/opt/mgu-deploy/safe-mode\nConditionPathExists=|/run/mgu-deploy/safe-mode-lifted\n';
     const out = fs.mkdtempSync(path.join(T, 'safe-'));
     const kit = (version) => {
         const res = hu(['artifact', fixtureCopy(version, (x) => {
@@ -5929,12 +5924,26 @@ function testSafeMode() {
     r = fr.run(['install', '--artifact', path.join(exempt, 'a-tool@0.1.0.tgz'), '--artifact', plainArtifact('0.4.0'), '--yes']);
     check('safe mode: an install whose first artifact goes through and a later one fails keeps it', res.status === 0 && r.status === 1 &&
         fs.existsSync(fr.tool('a-tool')) && fs.readFileSync(fr.p('var/opt/mgu-deploy/safe-mode'), 'utf8') === on &&
-        !fs.existsSync(fr.p('var/opt/mgu-deploy/safe-mode.held')), r.out);
-    // a run cut short leaves it held; the next run of the deploy tool puts it back
-    fs.renameSync(fr.p('var/opt/mgu-deploy/safe-mode'), fr.p('var/opt/mgu-deploy/safe-mode.held'));
+        !fs.existsSync(fr.p('run/mgu-deploy/safe-mode-lifted')), r.out);
+    // an install lifts it in RAM (/run) only: the flag stays on disk until the install went through
+    const lifted = fr.p('run/mgu-deploy/safe-mode-lifted');
+    fs.writeFileSync(fr.unitFile('fixture-tool.service.crash'), '');
+    r = fr.run(['install', '--artifact', path.join(exempt, 'a-tool@0.1.0.tgz'), '--yes']);
+    check('safe mode: an install that goes through leaves it, and its lift in RAM goes',
+        r.status === 0 && !fs.existsSync(fr.p('var/opt/mgu-deploy/safe-mode')) && !fs.existsSync(lifted), r.out);
+    // a run cut short leaves it lifted in RAM; the next run of the deploy tool (or the next start) ends that
+    write(fr.p('var/opt/mgu-deploy/safe-mode'), on);
+    write(lifted, '1\n');
     r = fr.run(['safe-mode', 'off']);
-    check('safe mode: a held flag a cut-short install left is back at the next run', fs.readFileSync(fr.p('var/opt/mgu-deploy/safe-mode'), 'utf8') === on &&
-        !fs.existsSync(fr.p('var/opt/mgu-deploy/safe-mode.held')), r.out);
+    check('safe mode: a lift a cut-short install left goes at the next run, the flag kept', fs.readFileSync(fr.p('var/opt/mgu-deploy/safe-mode'), 'utf8') === on &&
+        !fs.existsSync(lifted), r.out);
+    // a tool to lay again that fails without failing the run keeps it
+    fs.unlinkSync(fr.p('etc/systemd/system/fixture-tool.service'));
+    fs.writeFileSync(fr.unitFile('fixture-tool.service.crash'), `${path.join(fr.tool('fixture-tool'), 'current')} versions/0.2.0\n`);
+    r = fr.run(['install', '--artifact', path.join(exempt, 'a-tool@0.1.0.tgz'), '--yes']);
+    check('safe mode: an install whose re-lay of another tool fails (warned, exit 0) keeps it', r.status === 0 &&
+        /fixture-tool 0\.2\.0 is not laid again/.test(r.out) && fs.readFileSync(fr.p('var/opt/mgu-deploy/safe-mode'), 'utf8') === on &&
+        !fs.existsSync(lifted), r.out);
     // remove-all takes the guard out
     fs.rmSync(FLAG, { force: true });
     r = root.run(['remove-all', '--yes']);

@@ -6,6 +6,7 @@
 
 - An installed app's icon from its source is fetched too, so a removed app keeps its icon in the Store.
 - The deploy tool's safe mode shows in the state (`safeMode`), and the Store's Leave safe mode (`safe-mode-off`) leaves it. The updater runs in safe mode.
+- A tool installed from a repository's tree keeps its units' `runsInSafeMode`.
 - Before it asks for a restart of the head unit, the updater records it for the deploy tool, so the restart never counts against safe mode.
 
 ## 0.8.35

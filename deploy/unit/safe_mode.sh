@@ -22,8 +22,9 @@
 # crash statistics (recmgr_stats.db, table Crash, whose keys only grow; a
 # row only for a failure it restarts the head unit for, written just before
 # it asks) since this start's boot step, the statistics written within
-# STATS_RESTART_S of the shutdown; recmgr's startup, some 10 s into a
-# start, deletes its restartInfo.xml, also one of that same start. A shutdown without either
+# STATS_RESTART_S of the shutdown (a row has no time of its own: Timestamp
+# stays empty); recmgr's startup, some 10 s into a start, deletes its
+# restartInfo.xml, also one of that same start. A shutdown without either
 # record (a switch-off, the HMI's or the Store's restart) clears the count
 # once the start was up FAILED_UP_S; earlier, it could be a restart whose
 # records were lost, and neither counts nor clears. A start up RESET_UP_S
@@ -37,9 +38,7 @@
 #   safe-mode-crashes   "<boot id> <recmgr's last crash key at its boot step>"
 #   last-shutdown       "<boot id> crash|normal <uptime s> [recmgr] [crashhandler] [recmgr_stats]"
 #   restart-requested   "<boot id>": a restart our tools asked for in that start
-#   safe-mode           {"at": "<UTC time>", "reason": "<why>"}; safe-mode.held while an
-#                       install runs (the deploy tool's), back as safe-mode if the install
-#                       did not finish
+#   safe-mode           {"at": "<UTC time>", "reason": "<why>"}
 #
 # Always exits 0, and writes nothing without /var/opt/mgu-deploy.
 VAR_OPT=${MGU_DEPLOY_VAR_OPT:-/var/opt}
@@ -88,7 +87,8 @@ put() { printf '%s\n' "$2" > "$1.tmp" && mv -f "$1.tmp" "$1"; }
 crash_key() {
   [ -f "$STATS" ] && command -v sqlite3 >/dev/null 2>&1 || return 0
   out=$DIR/.crash-key.$$
-  sqlite3 "file:$STATS?mode=ro" 'SELECT ifnull(max(CrashKey), 0) FROM Crash;' > "$out" 2>/dev/null &
+  # a read that meets recmgr's commit waits up to 200 ms for it
+  sqlite3 "file:$STATS?mode=ro" 'PRAGMA busy_timeout=200; SELECT ifnull(max(CrashKey), 0) FROM Crash;' > "$out" 2>/dev/null &
   pid=$!
   # the timer holds none of the caller's output open, and takes its sleep along when stopped
   ( trap 'kill $s 2>/dev/null; exit 0' TERM; sleep "$STATS_WAIT_S" & s=$!; wait $s; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
@@ -113,8 +113,6 @@ boot)
   [ -e "$FLAG" ] && say "on: our tools' units do not start"
   ;;
 mark)
-  # safe mode an install held aside and did not settle: still on
-  [ -e "$FLAG.held" ] && mv -f "$FLAG.held" "$FLAG"
   up=$(uptime_s)
   [ -n "$up" ] || exit 0
   now=$(date +%s)
