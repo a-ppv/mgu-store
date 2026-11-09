@@ -1664,7 +1664,6 @@ class Updater {
             busy: this.busy,
             rebooting: this.rebooting,
             rebootError: this.rebootError,
-            // the deploy tool's safe mode, { at, reason } while our tools' units stay off, else null
             safeMode: this.safeMode,
             components: rows
         };

@@ -1635,19 +1635,17 @@ drop-in `/etc/systemd/system/<unit>.d/zz-mgu-deploy-limits.conf`:
 [Unit]
 StartLimitIntervalSec=600
 StartLimitBurst=20
-Wants=mgu-deploy-safe-mode.service
-After=mgu-deploy-safe-mode.service
 ConditionPathExists=!/var/opt/mgu-deploy/safe-mode
 
 [Service]
 LimitCORE=1
 ```
 
-The `Wants=`, `After=` and `ConditionPathExists=` lines keep the unit off in
-safe mode (below); a tool's socket, timer and path units get them alone, in a
-drop-in of the same name. A unit that runs in safe mode
-(`"runsInSafeMode": true`) has none of them: a service gets the limits
-alone, any other unit no drop-in.
+`ConditionPathExists=` keeps the unit off in safe mode (below); a tool's
+socket, timer and path units get it alone, in a drop-in of the same name. A
+unit that runs in safe mode (`"runsInSafeMode": true`) has none: a service
+gets the limits alone, any other unit no drop-in. Nothing orders a unit on
+safe mode's guard, so no unit, BMW's included, waits for it at boot.
 
 - `LimitCORE=1`: the kernel pipes core dumps to the crash handler, which
   restarts the head unit for a program its list does not name, and it writes
@@ -1700,7 +1698,9 @@ theirs on either record of it:
   `restartInfo.xml`, also one written in that same start: a restart before
   then leaves only this record.
 
-Four failed starts in a row turn safe mode on. Nothing else counts:
+The shutdown that ends the fourth failed start in a row turns safe mode on,
+so the fifth start is the first without our tools: four failed starts.
+Nothing else counts:
 
 | How a start ended | The count |
 |---|---|
@@ -1717,26 +1717,30 @@ drive after it never counts as an early end. A state file that is missing
 or does not read as `safe_mode.sh` writes it counts nothing, so it can
 never turn safe mode on.
 
-**How.** `safe_mode.sh` (beside `mgu-deploy.js`) does the counting, in sh, in
-three places:
+**How.** `safe_mode.sh` (beside `mgu-deploy.js`) does it, in sh:
 
 - `mark`, at each shutdown through the NodeStateManager: the drop-in
   `/etc/systemd/system/var-opt-ro.service.d/40-mgu-deploy-safe-mode.conf`
   runs it before `/var/opt` goes read-only (`ExecStartPre=-`, so it never
   holds up the remount). recmgr's and crashhandler's restarts, a switch-off
-  and a normal restart all take that path. It writes `last-shutdown`:
-  `<boot id> crash|normal <uptime s> [recmgr] [crashhandler] [recmgr_stats]`.
-- `boot`, at the next start: `mgu-deploy-safe-mode.service`
+  and a normal restart all take that path. It writes `last-shutdown`
+  (`<boot id> crash|normal <uptime s> [recmgr] [crashhandler]
+  [recmgr_stats]`) and `safe-mode-count` (`<failed starts in a row before
+  this start> <boot id> <with this start>`; a second shutdown of the same
+  start counts it again from the first number), and at the fourth failed
+  start in a row writes `safe-mode`, `{"at": "<UTC time>", "reason":
+  "<why>"}`, and starts the count again. The flag is there before the next
+  start's units, so nothing has to wait at boot.
+- `boot`, early at each start: `mgu-deploy-safe-mode.service`
   (`DefaultDependencies=no`, after `/var/opt` is mounted, enabled for
-  `multi-user.target` and in recmgr's list). Every tool unit's drop-in
-  orders it after this one. It counts the start before from
-  `last-shutdown` and `restart-requested`, writes `safe-mode-count` (`<failed
-  starts in a row> <boot id it counted in>`) and `safe-mode-crashes` (`<boot
-  id> <recmgr's last crash key>`), and at the fourth failed start in a row
-  writes `safe-mode`, `{"at": "<UTC time>", "reason": "<why>"}`, and starts
-  the count again.
+  `multi-user.target`, in recmgr's list, and ordered with no other unit).
+  It writes `safe-mode-crashes` (`<boot id> <recmgr's last crash key>`), the
+  baseline for this start's mark.
 - `up`, the same service: at 5 minutes of uptime the count goes back to 0.
   The service then stays up, so recmgr never sees it end.
+
+The statistics are read with the database opened read-only
+(`file:…?mode=ro`, the firmware's `sqlite3` 3.22), for at most 2 s.
 
 Each file is written whole (renamed into place) under `/var/opt/mgu-deploy`.
 On a head unit whose firmware has `var-opt-ro.service`, an install lays the
@@ -1764,10 +1768,13 @@ files back. `deploy/hu artifact` carries the flag into the kit. The deploy
 tool's own units (the boot check, the fallback, the guard) are not tool
 units and run as before.
 
-**Leaving it.** The next install that goes through (an install or update of
-any app or tool, the same version again included) removes `safe-mode`
-before its first artifact, so what it starts runs, and puts it back when
-none goes through. `safe-mode off --yes` removes it too: the Store's Leave
+**Leaving it.** The next install that goes through as a whole (an install
+or update of any app or tool, the same version again included) leaves it:
+`safe-mode` is set aside as `safe-mode.held` before the first artifact, so
+what the install starts runs, and goes once every artifact and the deploy
+tool's own update are through. An install that fails, partly or wholly, or
+that the MainApp guard stops puts it back; one cut short leaves it held,
+and the next run of the deploy tool or the next shutdown puts it back. `safe-mode off --yes` removes it too: the Store's Leave
 safe mode, through the updater. Either way the count starts again, the
 tools start at the next start of the head unit, and until then `status`
 lists `mgu-deploy` under `pending_reboot` (`our tools start at the next

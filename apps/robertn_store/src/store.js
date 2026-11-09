@@ -98,6 +98,7 @@ const ROW_KEY = 2;                      // a press's row in a raw userEvent's pa
 const VALUE_KEY = 0;                    // a focus event's value
 const QR_PREFIX = 'qr_';
 const RENDERER_WAIT_MS = 1500;          // at start, how long the renderer may take to answer
+const SAFE_MODE_SHOW_MS = 600;          // Leave safe mode shows once the start screen has had the focus this long
 const TOKEN_ADD_MS = 30000;             // how long Add token says "Checking token" without an answer
 const FOCUS_BACK_MS = 2000;             // how long a page waits for the HMI to give the focus back from the speller
 const PROBE_MS = 30000;                 // how long a repo being added waits for the updater's answer
@@ -207,6 +208,8 @@ class Store extends OnlineApp {
         this._visibleStates = new Set();
         this._hideTimer = null;
         this._webUrlTimer = null;
+        this._startFocusAt = null;      // since when the start screen has the HMI's focus
+        this._startFocusTimer = null;
         this._visible = false;
         this._sawForeground = false;
         this._shutdownPromise = null;
@@ -598,8 +601,14 @@ class Store extends OnlineApp {
         // if nothing became visible meanwhile.
         // the page in focus: a confirm step closing gives it back to the page below
         stateNames.filter((name) => !hosts.some((h) => h.name === name)).forEach((name) => this._states[name].on('focus', (ev) => {
-            if (isTrue(ev && ev.focus)) {
+            const focused = isTrue(ev && ev.focus);
+            if (name === ROOTS.widgets) {
+                this._startFocusSince(focused);
+            }
+            if (focused) {
                 this._focusedPage = name;
+            }
+            if (focused || name === ROOTS.widgets) {
                 this._render();
             }
         }));
@@ -868,6 +877,15 @@ class Store extends OnlineApp {
         this._render();
         Promise.resolve(this.rhmiApplication.openState(name))
             .catch((err) => logger.warn(`openState ${name} failed: ${err && err.message}`));
+    }
+
+    /* The start screen has the focus since now (focused), or not. */
+    _startFocusSince(focused) {
+        clearTimeout(this._startFocusTimer);
+        this._startFocusAt = focused ? Date.now() : null;
+        if (focused) {
+            this._startFocusTimer = setTimeout(() => this._render(), SAFE_MODE_SHOW_MS);
+        }
     }
 
     _closeState(name) {
@@ -1530,7 +1548,9 @@ class Store extends OnlineApp {
         const connected = this._connected && !!st;
         this._set(C.status, 'Text', connected ? statusLine(st, true) : statusLine(null, false, !!readSecret()), 'Text');
         this._set(C.check, 'Text', connected && st.catalog.checking ? tr("Checking") : tr("Check for updates"), 'Text');
-        this._show(C.safeModeOff, connected && !!st.safeMode && !st.busy);
+        // shown above the focus the HMI gave the start screen, so a press there never leaves safe mode
+        this._show(C.safeModeOff, connected && !!st.safeMode && !st.busy && this._startFocusAt !== null &&
+            Date.now() - this._startFocusAt >= SAFE_MODE_SHOW_MS);
 
         const busy = connected ? st.busy : null;
         const busyRow = busy && st.components.find((c) => c.id === busy.id);
@@ -1773,6 +1793,9 @@ class Store extends OnlineApp {
         }
         this._visible = visible;
         clearTimeout(this._hideTimer);
+        if (!visible) {
+            this._startFocusSince(false);
+        }
         this._pollWebUrl(false);
         logger.info(`screen ${visible ? 'visible' : 'hidden'}`);
         if (visible) {
@@ -1799,6 +1822,7 @@ class Store extends OnlineApp {
         }
         logger.info(`store shutting down (${reason})`);
         clearTimeout(this._hideTimer);
+        clearTimeout(this._startFocusTimer);
         clearTimeout(this._tokenAdding && this._tokenAdding.timer);
         this._endPick();
         this._pollWebUrl(false);
