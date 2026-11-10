@@ -1751,9 +1751,11 @@ never turn safe mode on.
   holds up the remount). recmgr's and crashhandler's restarts, a switch-off
   and a normal restart all take that path. It writes `last-shutdown`
   (`<boot id> crash|normal <uptime s> [recmgr] [crashhandler]
-  [recmgr_stats]`) and `safe-mode-count` (`<failed starts in a row before
-  this start> <boot id> <with this start>`; a second shutdown of the same
-  start counts it again from the first number), and at the fourth failed
+  [recmgr_stats]`), once before the statistics read and again after it, so
+  a shutdown cut during the read still finds the start marked, and
+  `safe-mode-count` (`<failed starts in a row before this start> <boot id>
+  <with this start>`; a second shutdown of the same start counts it again
+  from the first number), and at the fourth failed
   start in a row writes `safe-mode`, `{"at": "<UTC time>", "reason":
   "<why>"}`, and starts the count again. The flag is there before the next
   start's units, so nothing has to wait at boot.
@@ -1765,7 +1767,8 @@ never turn safe mode on.
   short|long <unmarked short starts in a row before it>`), counting the
   start before when it left no mark (above).
 - `up`, the same service: at 2 minutes of uptime it records the start as
-  `long` in `safe-mode-start`, at 5 minutes the count goes back to 0. The
+  `long` in `safe-mode-start`, at 5 minutes the count goes back to 0, both
+  by `/proc/uptime`, looked at every 5 s, so a suspend counts as time up. The
   service then stays up, so recmgr never sees it end.
 
 The statistics are read with the database opened read-only

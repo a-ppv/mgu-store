@@ -56,6 +56,8 @@ PROC_STAT=${MGU_DEPLOY_PROC_STAT:-/proc/stat}
 THRESHOLD=4
 FAILED_UP_S=120
 RESET_UP_S=300
+# how often `up` looks at the uptime while it waits
+UP_POLL_S=5
 # the longest a read of recmgr's statistics may take
 STATS_WAIT_S=2
 # recmgr's restart follows its statistics' write within this
@@ -79,6 +81,16 @@ uptime_s() {
   u=$(cut -d. -f1 "$UPTIME" 2>/dev/null | cut -d' ' -f1)
   case "$u" in ''|*[!0-9]*) return ;; esac
   echo "$u"
+}
+
+# wait_up <s>: until the start has been up s seconds by /proc/uptime, which
+# counts a suspend too (sleep does not); at once when it cannot be read
+wait_up() {
+  while u=$(uptime_s) && [ -n "$u" ] && [ "$u" -lt "$1" ]; do
+    w=$(($1 - u))
+    [ "$w" -gt "$UP_POLL_S" ] && w=$UP_POLL_S
+    sleep "$w"
+  done
 }
 
 is_number() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "${#1}" -le 9 ]; }
@@ -166,6 +178,9 @@ mark)
     case "$t" in ''|*[!0-9]*) continue ;; esac
     [ "$t" -ge $((since - 1)) ] && [ "$t" -le $((now + 1)) ] && who="$who $m"
   done
+  # the mark so far, before the slower statistics read: a shutdown cut
+  # during that read still finds this start marked
+  if [ -n "$who" ]; then put "$LAST" "$boot crash $up$who"; else put "$LAST" "$boot normal $up"; fi
   # shellcheck disable=SC2046 # two words
   set -- $(first_line "$CRASHES")
   if [ "$1" = "$boot" ] && is_number "$2"; then
@@ -196,13 +211,11 @@ mark)
   count_set "$base" "$boot" "$count"
   ;;
 up)
-  up=$(uptime_s)
-  [ -n "$up" ] && [ "$up" -lt "$FAILED_UP_S" ] && sleep $((FAILED_UP_S - up))
+  wait_up "$FAILED_UP_S"
   # shellcheck disable=SC2046 # three words
   set -- $(first_line "$START")
   [ "$1" = "$boot" ] && put "$START" "$boot long $3"
-  up=$(uptime_s)
-  [ -n "$up" ] && [ "$up" -lt "$RESET_UP_S" ] && sleep $((RESET_UP_S - up))
+  wait_up "$RESET_UP_S"
   # shellcheck disable=SC2046 # three words
   set -- $(first_line "$COUNT")
   if [ "$*" != "0 $boot 0" ]; then

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+In the deploy tool's safe mode the status line says Safe mode, and Leave
+safe mode on the start screen leaves it.
+
 ## 0.9.35
 
 No changes.
@@ -10,8 +13,6 @@ No changes.
 
 A Remove the updater refuses says why on the component's page, such as
 *Needed by Waze on cluster* when another installed app needs it.
-In the deploy tool's safe mode the status line says Safe mode, and Leave
-safe mode on the start screen leaves it.
 
 ## 0.9.33
 

@@ -5689,6 +5689,10 @@ function testSafeMode() {
     const env = { PATH: `${gp('bin')}:${process.env.PATH}`, MGU_DEPLOY_VAR_OPT: gp('var/opt'), MGU_DEPLOY_BOOT_ID: gp('proc/boot_id'),
         MGU_DEPLOY_PROC: gp('proc'), MGU_DEPLOY_PROC_STAT: gp('proc/stat') };
     const guard = (cmd) => cp.spawnSync('sh', [SCRIPT, cmd], { encoding: 'utf8', env, timeout: 15000 });
+    // the up step while the uptime moves on: the shell commands in bg run beside it
+    const upWhile = (bg) => cp.spawnSync('sh', ['-c', `( ${bg} ) >/dev/null 2>&1 & exec sh '${SCRIPT}' up`],
+        { encoding: 'utf8', env, timeout: 30000 });
+    const setUp = (secs) => `echo '${secs}.42 77.00' > '${gp('proc/uptime')}'`;
     const up = (s) => write(gp('proc/uptime'), `${s}.42 77.00\n`);
     let n8 = 0;
     // a start of the head unit: a new boot id and btime; recmgr and crashhandler delete their records
@@ -5814,9 +5818,9 @@ function testSafeMode() {
     next();
     up(299);
     t0 = Date.now();
-    r = guard('up');
-    check('safe mode: a start that stays up 5 minutes clears the count, waiting until then', r.status === 0 && count() === '0' &&
-        Date.now() - t0 >= 500 && /up 300 s/.test(r.stdout), r.stdout + r.stderr);
+    r = upWhile(`sleep 1; ${setUp(300)}`);
+    check('safe mode: a start that stays up 5 minutes clears the count, waiting until its uptime says so', r.status === 0 && count() === '0' &&
+        Date.now() - t0 >= 900 && /up 300 s/.test(r.stdout), r.stdout + r.stderr);
     crashAt(30);
     check('safe mode: and a crash at its shutdown after it starts the count at one', count() === '1');
     next();
@@ -5831,9 +5835,15 @@ function testSafeMode() {
     guard('boot');
     check('safe mode: the boot step run again in the same start counts nothing more', count() === '2');
     next();
-    up(310);
-    guard('up');
-    check('safe mode: a start that reaches 2 minutes records it', / long 1$/.test(fs.readFileSync(startFile, 'utf8').trim()));
+    // a suspend: the uptime jumps past 2 minutes while sleep does not run
+    up(30);
+    const seen = gp('long-seen');
+    t0 = Date.now();
+    r = upWhile(`sleep 1; ${setUp(200)}; i=0; while [ $i -lt 40 ] && ! grep -q ' long ' '${startFile}'; do sleep 0.25; i=$((i + 1)); done; ` +
+        `grep -q ' long ' '${startFile}' && touch '${seen}'; ${setUp(310)}`);
+    check('safe mode: a start that reaches 2 minutes by its uptime (a suspend included) records it then, not at 5 minutes',
+        r.status === 0 && / long 1$/.test(fs.readFileSync(startFile, 'utf8').trim()) && fs.existsSync(seen) && Date.now() - t0 < 20000,
+    `${Date.now() - t0} ms ${r.stdout}${r.stderr}`);
     next();
     check('safe mode: one without a mark that lasted longer counts nothing and starts the run again', count() === '0' &&
         / short 0$/.test(fs.readFileSync(startFile, 'utf8').trim()));
@@ -5898,6 +5908,21 @@ function testSafeMode() {
     r = guard('boot');
     check('safe mode: a statistics read that does not answer is given up after 2 s, no baseline', r.status === 0 &&
         Date.now() - t0 < 6000 && !fs.existsSync(gp('var/opt/mgu-deploy/safe-mode-crashes')), `${Date.now() - t0} ms`);
+    // a shutdown cut during that read: the mark so far is on disk, the count as it was
+    write(gp('var/opt/mgu-deploy/safe-mode-crashes'), `${bootNow()} 5\n`);
+    const countWas = fs.readFileSync(countFile, 'utf8');
+    up(30);
+    record('recmgr', now());
+    cp.spawnSync('sh', [SCRIPT, 'mark'], { env, timeout: 1000, killSignal: 'SIGKILL', stdio: 'ignore' });
+    check('safe mode: a shutdown cut during the statistics read leaves the start marked, with the records read before it, the count as it was',
+        fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8') === `${bootNow()} crash 30 recmgr\n` &&
+        fs.readFileSync(countFile, 'utf8') === countWas, fs.readFileSync(gp('var/opt/mgu-deploy/last-shutdown'), 'utf8'));
+    fs.rmSync(gp('var/opt/public/sin/recmgr/restartInfo.xml'), { force: true });
+    up(30);
+    cp.spawnSync('sh', [SCRIPT, 'mark'], { env, timeout: 1000, killSignal: 'SIGKILL', stdio: 'ignore' });
+    next();
+    check('safe mode: and without records the next start finds it marked: no start without a mark is counted',
+        / short 0$/.test(fs.readFileSync(gp('var/opt/mgu-deploy/safe-mode-start'), 'utf8').trim()) && fs.readFileSync(countFile, 'utf8') === countWas);
 
     // ---- the deploy tool ----
     const sys = (root, rel) => root.p(`etc/systemd/system/${rel}`);
