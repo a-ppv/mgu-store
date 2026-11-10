@@ -5,10 +5,10 @@
 # units named in $FAKE_ACTIVE, else "inactive"), <unit>.nrestarts its
 # NRestarts (0 without it). start and restart make a unit active, stop
 # inactive. A unit whose <unit>.crash file holds "<link> <target> [<n>]"
-# crash-loops while that link points at that target (with <n>: only as
-# the run its first <n> starts and restarts began, counted in
-# <unit>.starts): each show then finds its NRestarts one higher. A call whose arguments equal $FAKE_FAIL
-# exits 1. is-enabled answers "enabled" for a unit file present in
+# crash-loops while that link points at that target (with <n>: only while
+# <unit>.starts, its count of starts and restarts, is at most <n>): each
+# show then finds its NRestarts one higher. A call whose arguments equal
+# $FAKE_FAIL exits 1. is-enabled answers "enabled" for a unit file present in
 # $MGU_DEPLOY_SYSTEMD. is-system-running answers what $FAKE_UNITS/system holds,
 # else "running". show also gives <unit>.result's Result (success without
 # it).

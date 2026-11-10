@@ -5285,8 +5285,8 @@ function testSourcePackages() {
 }
 
 /* Safe mode through an install that installs an app afresh inside it
- * (reinstallApp's own install): only the outermost install lifts and
- * settles it, and a shortfall anywhere in it keeps it. */
+ * (reinstallApp's own install): every run with work lifts it, only the
+ * outermost settles it, and a shortfall anywhere in it keeps it. */
 function testSafeModeAfresh() {
     const file = sourceArtifact('1.2.3');
     const on = '{"at": "2026-11-09T10:00:00Z", "reason": "test"}\n';
