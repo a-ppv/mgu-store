@@ -1726,7 +1726,17 @@ Nothing else counts:
 | the start stayed up 5 minutes | back to 0 |
 | a shutdown without either record within 2 minutes (a short drive, or a restart whose records were lost) | kept |
 | a crash restart between 2 and 5 minutes | kept |
-| no shutdown mark: a power cut, a reset that skipped `var-opt-ro.service`, `systemctl reboot` | kept |
+| no shutdown mark (a power cut, a reset that skipped `var-opt-ro.service`, `systemctl reboot`), within 2 minutes: the first | kept |
+| the same, the second in a row | + 1 (and the run of them starts again) |
+| no shutdown mark, after 2 minutes | kept (and the run starts again) |
+
+A start with no shutdown mark is counted at the next start's boot step,
+from what it recorded itself: whether it reached 2 minutes. So two power
+cuts in a row, each within 2 minutes of the start, count as one failed
+start, as does a loop of resets that leave no record; a marked start
+between two unmarked ones starts their run again. When such a pair is the
+fourth failed start, the flag is written at that boot step: the units of
+ours that have not started yet stay off, the rest at the next start.
 
 A suspend keeps the start (and its boot id) and its uptime runs on, so a
 drive after it never counts as an early end. A state file that is missing
@@ -1751,9 +1761,12 @@ never turn safe mode on.
   (`DefaultDependencies=no`, after `/var/opt` is mounted, enabled for
   `multi-user.target`, in recmgr's list, and ordered with no other unit).
   It writes `safe-mode-crashes` (`<boot id> <recmgr's last crash key>`), the
-  baseline for this start's mark.
-- `up`, the same service: at 5 minutes of uptime the count goes back to 0.
-  The service then stays up, so recmgr never sees it end.
+  baseline for this start's mark, and `safe-mode-start` (`<boot id>
+  short|long <unmarked short starts in a row before it>`), counting the
+  start before when it left no mark (above).
+- `up`, the same service: at 2 minutes of uptime it records the start as
+  `long` in `safe-mode-start`, at 5 minutes the count goes back to 0. The
+  service then stays up, so recmgr never sees it end.
 
 The statistics are read with the database opened read-only
 (`file:…?mode=ro`, the firmware's `sqlite3` 3.22), for at most 2 s.

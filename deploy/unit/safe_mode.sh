@@ -5,9 +5,11 @@
 # The flag is written at a shutdown, so it is there before the next start.
 #
 #   safe_mode.sh boot   early at each start (mgu-deploy-safe-mode.service):
-#                       recmgr's last crash key, the baseline for the mark
-#   safe_mode.sh up     the same service: a start that stays up RESET_UP_S
-#                       clears the count
+#                       recmgr's last crash key, the baseline for the mark;
+#                       the start before, when it left no mark, counted
+#   safe_mode.sh up     the same service: records that the start reached
+#                       FAILED_UP_S, and one that stays up RESET_UP_S clears
+#                       the count
 #   safe_mode.sh mark   at each shutdown through the NodeStateManager
 #                       (var-opt-ro.service, drop-in
 #                       40-mgu-deploy-safe-mode.conf), before /var/opt goes
@@ -28,14 +30,18 @@
 # record (a switch-off, the HMI's or the Store's restart) clears the count
 # once the start was up FAILED_UP_S; earlier, it could be a restart whose
 # records were lost, and neither counts nor clears. A start up RESET_UP_S
-# clears it too. A start without a mark (a power cut, a reset that skipped
-# var-opt-ro.service) or a crash restart after FAILED_UP_S neither counts
-# nor clears. A state file that is missing or does not read as written
-# counts nothing.
+# clears it too. A crash restart after FAILED_UP_S neither counts nor
+# clears. A start without a mark (a power cut, a reset that skipped
+# var-opt-ro.service) is seen at the next start's boot step: one that
+# ended within FAILED_UP_S (it never recorded reaching it) neither counts
+# nor clears, the second of them in a row counts one; one that lasted
+# longer, or a marked start between them, starts that run again. A state
+# file that is missing or does not read as written counts nothing.
 #
 # Files in /var/opt/mgu-deploy, each written whole (renamed into place):
 #   safe-mode-count     "<failed starts in a row before the start> <boot id> <with it>"
 #   safe-mode-crashes   "<boot id> <recmgr's last crash key at its boot step>"
+#   safe-mode-start     "<boot id> short|long <unmarked short starts in a row before it>"
 #   last-shutdown       "<boot id> crash|normal <uptime s> [recmgr] [crashhandler] [recmgr_stats]"
 #   restart-requested   "<boot id>": a restart our tools asked for in that start
 #   safe-mode           {"at": "<UTC time>", "reason": "<why>"}
@@ -58,6 +64,7 @@ STATS_RESTART_S=60
 LAST=$DIR/last-shutdown
 COUNT=$DIR/safe-mode-count
 CRASHES=$DIR/safe-mode-crashes
+START=$DIR/safe-mode-start
 REQUESTED=$DIR/restart-requested
 FLAG=$DIR/safe-mode
 STATS=$SIN/recmgr/recmgr_stats.db
@@ -80,6 +87,17 @@ is_count() { is_number "$1" && [ "$1" -lt "$THRESHOLD" ]; }
 
 # put <file> <text>: the text whole into the file
 put() { printf '%s\n' "$2" > "$1.tmp" && mv -f "$1.tmp" "$1"; }
+
+# count_set <count before> <boot id> <count after>: the count, and at the
+# threshold the flag (the count then starts again)
+count_set() {
+  c=$3
+  if [ "$c" -ge "$THRESHOLD" ]; then
+    c=0
+    [ -e "$FLAG" ] || put "$FLAG" "{\"at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"reason\": \"$THRESHOLD failed starts in a row, each within $FAILED_UP_S s\"}"
+  fi
+  put "$COUNT" "$1 $2 $c"
+}
 
 # recmgr's last crash key (0 with none), read from the database opened
 # read-only within STATS_WAIT_S; empty without its statistics or sqlite3,
@@ -110,6 +128,28 @@ case "$1" in
 boot)
   k=$(crash_key)
   if [ -n "$k" ]; then put "$CRASHES" "$boot $k"; else rm -f "$CRASHES"; fi
+  # shellcheck disable=SC2046 # three words
+  set -- $(first_line "$START")
+  s_boot=$1 s_len=$2 s_run=$3
+  # shellcheck disable=SC2046 # the boot id the last mark names first
+  set -- $(first_line "$LAST")
+  if [ "$s_boot" != "$boot" ]; then
+    run=0
+    # the start before left no mark and never reached FAILED_UP_S
+    if [ -n "$s_boot" ] && [ "$1" != "$s_boot" ] && [ "$s_len" = short ] && is_number "$s_run"; then
+      run=$((s_run + 1))
+    fi
+    if [ "$run" -ge 2 ]; then
+      run=0
+      # shellcheck disable=SC2046 # three words
+      set -- $(first_line "$COUNT")
+      base=$3
+      is_count "$base" && [ -n "$2" ] || base=0
+      count_set "$base" "$s_boot" $((base + 1))
+      say "two starts in a row ended within ${FAILED_UP_S} s without a shutdown: one failed start"
+    fi
+    put "$START" "$boot short $run"
+  fi
   [ -e "$FLAG" ] && say "on: our tools' units do not start"
   ;;
 mark)
@@ -153,13 +193,14 @@ mark)
   else
     count=$base
   fi
-  if [ "$count" -ge "$THRESHOLD" ]; then
-    count=0
-    [ -e "$FLAG" ] || put "$FLAG" "{\"at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"reason\": \"$THRESHOLD starts in a row ended in a restart after a crash within $FAILED_UP_S s\"}"
-  fi
-  put "$COUNT" "$base $boot $count"
+  count_set "$base" "$boot" "$count"
   ;;
 up)
+  up=$(uptime_s)
+  [ -n "$up" ] && [ "$up" -lt "$FAILED_UP_S" ] && sleep $((FAILED_UP_S - up))
+  # shellcheck disable=SC2046 # three words
+  set -- $(first_line "$START")
+  [ "$1" = "$boot" ] && put "$START" "$boot long $3"
   up=$(uptime_s)
   [ -n "$up" ] && [ "$up" -lt "$RESET_UP_S" ] && sleep $((RESET_UP_S - up))
   # shellcheck disable=SC2046 # three words

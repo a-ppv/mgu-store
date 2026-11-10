@@ -5796,7 +5796,7 @@ function testSafeMode() {
     let f = null;
     try { f = JSON.parse(fs.readFileSync(flag, 'utf8')); } catch (e) { /* checked below */ }
     check('safe mode: the fourth in a row turns it on at its shutdown: the flag with the time and the reason, the count from zero',
-        f && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(f.at) && /^4 starts in a row ended in a restart after a crash within 120 s$/.test(f.reason) &&
+        f && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(f.at) && /^4 failed starts in a row, each within 120 s$/.test(f.reason) &&
         count() === '0', JSON.stringify(f));
     crashAt(16);
     check('safe mode: a second mark of that start keeps it as it is', count() === '0' && fs.existsSync(flag));
@@ -5820,6 +5820,35 @@ function testSafeMode() {
     crashAt(30);
     check('safe mode: and a crash at its shutdown after it starts the count at one', count() === '1');
     next();
+
+    // starts that leave no shutdown mark (power cuts, resets that skip var-opt-ro.service), seen at the next boot step
+    const startFile = gp('var/opt/mgu-deploy/safe-mode-start');
+    next();
+    check('safe mode: one start without a mark that ended within 2 minutes counts nothing', count() === '1' &&
+        / short 1$/.test(fs.readFileSync(startFile, 'utf8').trim()));
+    r = next();
+    check('safe mode: the second in a row counts one', count() === '2' && /two starts in a row ended within 120 s/.test(r.stdout), r.stdout);
+    guard('boot');
+    check('safe mode: the boot step run again in the same start counts nothing more', count() === '2');
+    next();
+    up(310);
+    guard('up');
+    check('safe mode: a start that reaches 2 minutes records it', / long 1$/.test(fs.readFileSync(startFile, 'utf8').trim()));
+    next();
+    check('safe mode: one without a mark that lasted longer counts nothing and starts the run again', count() === '0' &&
+        / short 0$/.test(fs.readFileSync(startFile, 'utf8').trim()));
+    next();
+    crashAt(30);
+    check('safe mode: a marked crash between starts without a mark counts as usual', count() === '1');
+    next();
+    check('safe mode: and starts the run again', / short 0$/.test(fs.readFileSync(startFile, 'utf8').trim()) && count() === '1');
+    next();
+    next();
+    check('safe mode: two without a mark after it count one', count() === '2');
+    [1, 2, 3, 4].forEach(() => next());
+    check('safe mode: the fourth failed start, by starts without a mark, turns it on at the boot step after them', count() === '0' &&
+        /^4 failed starts in a row, each within 120 s$/.test(JSON.parse(fs.readFileSync(flag, 'utf8')).reason));
+    fs.unlinkSync(flag);
 
     // corrupt or missing files never turn safe mode on
     write(countFile, `0 x 9\n`);
@@ -5931,11 +5960,11 @@ function testSafeMode() {
 
     // safe mode on
     const FLAG = root.p('var/opt/mgu-deploy/safe-mode');
-    const on = '{"at": "2026-11-09T10:00:00Z", "reason": "4 starts in a row ended in a restart after a crash within 120 s"}\n';
+    const on = '{"at": "2026-11-09T10:00:00Z", "reason": "4 failed starts in a row, each within 120 s"}\n';
     write(FLAG, on);
     st = root.status();
     check('safe mode: status --json reports it', JSON.stringify(st.safe_mode) ===
-        JSON.stringify({ at: '2026-11-09T10:00:00Z', reason: '4 starts in a row ended in a restart after a crash within 120 s' }), JSON.stringify(st.safe_mode));
+        JSON.stringify({ at: '2026-11-09T10:00:00Z', reason: '4 failed starts in a row, each within 120 s' }), JSON.stringify(st.safe_mode));
     r = root.run(['status']);
     check('safe mode: plain status says so', r.stdout.includes('safe mode: on since 2026-11-09T10:00:00Z'), r.stdout);
     write(FLAG, 'torn');
